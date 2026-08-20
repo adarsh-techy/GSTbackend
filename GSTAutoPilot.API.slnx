@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="../../../../Users/sijoj/Downloads/042026_32AABCF1608B1ZJ_GSTR2B_26052026.xlsx" />
+    <File Path="../../../../Users/sijoj/Downloads/1.docx" />
+    <File Path="../../../../Users/sijoj/Downloads/GST API.postman_collection/GST API.postman_collection/GST api postman collection.json" />
+    <File Path="../../../../Users/sijoj/Downloads/GST API.postman_collection/GST API.postman_collection/WB-GST-API.postman_collection.json" />
+    <File Path="../../../../Users/sijoj/Downloads/invoice_74.pdf" />
+    <File Path="../../../../Users/sijoj/Downloads/Return-Filing-through-API_v1.1.docx" />
+    <File Path="../../../../Users/sijoj/Downloads/whitebooks-gst-api-documentation.docx" />
+    <File Path="../../../../Users/sijoj/OneDrive/Pictures/Screenshots/KSCC Setting page.png" />
+  </Folder>
+  <Project Path="GSTAutoPilot.API/GSTAutoPilot.API.csproj" />
+  <Project Path="GSTAutoPilot.Application/GSTAutoPilot.Application.csproj" />
+  <Project Path="GSTAutoPilot.Domain/GSTAutoPilot.Domain.csproj" />
+  <Project Path="GSTAutoPilot.Infrastructure/GSTAutoPilot.Infrastructure.csproj" />
+</Solution>

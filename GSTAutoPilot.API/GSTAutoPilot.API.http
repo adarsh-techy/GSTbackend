@@ -1,0 +1,6 @@
+@GSTAutoPilot.API_HostAddress = http://localhost:5051
+
+GET {{GSTAutoPilot.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

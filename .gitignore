@@ -1,0 +1,17 @@
+## Visual Studio / Build Artifacts
+.vs/
+[Bb]in/
+[Oo]bj/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Logs
+*.log
+
+## OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
