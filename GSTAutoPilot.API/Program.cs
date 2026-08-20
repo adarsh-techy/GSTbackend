@@ -19,6 +19,24 @@ builder.Host.UseWindowsService();
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 
+// Configure CORS for Vercel and local frontend clients
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowFrontend", policy =>
+    {
+        policy.WithOrigins(
+                "http://localhost:5173",
+                "http://localhost:3000",
+                "https://gs-tclient.vercel.app",
+                "https://gs-tclient-git-main-adarsh-techys-projects.vercel.app"
+              )
+              .SetIsOriginAllowed(_ => true)
+              .AllowAnyMethod()
+              .AllowAnyHeader()
+              .AllowCredentials();
+    });
+});
+
 // Global Exception Handler & ProblemDetails
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
@@ -106,6 +124,8 @@ app.UseExceptionHandler();
 // Apply X-Forwarded-* before anything that inspects scheme/host (HTTPS redirect,
 // auth). Must run first in the pipeline.
 app.UseForwardedHeaders();
+
+app.UseCors("AllowFrontend");
 
 if (app.Environment.IsDevelopment())
 {
