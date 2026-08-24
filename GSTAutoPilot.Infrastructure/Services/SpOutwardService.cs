@@ -146,10 +146,9 @@ public class SpOutwardService
     }
 
     // Sales invoice counts per period (yyyyMM) for the ERP period selector.
-    // The SP is per-GSTIN and per-date-range, so we run it once per GSTIN over a
-    // recent window and let SQL aggregate (COUNT(DISTINCT BillId) grouped by
-    // month) — only one small row per month comes back, not every line. Older
-    // periods (before the window) simply carry no SP sales count.
+    // Reads the SP with a DataReader (no INSERT..EXEC into a fixed-shape temp
+    // table, which breaks whenever the SP column shape differs) and counts
+    // DISTINCT BillIds per period in memory.
     public async Task<Dictionary<string, int>> OutwardCountsByPeriodAsync(CancellationToken ct = default)
     {
         const int monthsBack = 24;
@@ -162,7 +161,7 @@ public class SpOutwardService
         var end = firstOfThisMonth.AddMonths(1).AddDays(-1);
 
         var gstins = await ResolveGstinsAsync(ct);
-        var counts = new Dictionary<string, int>();
+        var billsByPeriod = new Dictionary<string, HashSet<int>>();
 
         var conn = (SqlConnection)_carol.Database.GetDbConnection();
         var shouldClose = conn.State != ConnectionState.Open;
@@ -172,24 +171,33 @@ public class SpOutwardService
             foreach (var gstin in gstins)
             {
                 await using var cmd = conn.CreateCommand();
-                // Capture the SP's rows into a temp table, then aggregate server-
-                // side so only ~one row per month crosses the wire. The SP name is
-                // a validated identifier; the three params are bound.
-                cmd.CommandText = $@"
-CREATE TABLE #sp (TableRowId int NULL, BillId int NULL, BillNumber nvarchar(200) NULL, BillDate datetime NULL, AccountName nvarchar(300) NULL, GstNumber nvarchar(50) NULL, TotalAmt decimal(20,4) NULL, TaxableAmt decimal(20,4) NULL, GstRate decimal(12,4) NULL, HSNCode nvarchar(60) NULL, CGSTAmt decimal(20,4) NULL, SGSTAmt decimal(20,4) NULL, IGSTAmt decimal(20,4) NULL, GstType nvarchar(30) NULL);
-INSERT INTO #sp EXEC {sp} @GstNo, @StartDate, @EndDate;
-SELECT CONVERT(char(6), BillDate, 112) AS Period, COUNT(DISTINCT BillId) AS Cnt FROM #sp WHERE BillDate IS NOT NULL GROUP BY CONVERT(char(6), BillDate, 112);
-DROP TABLE #sp;";
+                cmd.CommandType = CommandType.StoredProcedure;
+                cmd.CommandText = sp;
+                cmd.CommandTimeout = 120;
                 cmd.Parameters.Add(new SqlParameter("@GstNo", gstin));
                 cmd.Parameters.Add(new SqlParameter("@StartDate", start));
                 cmd.Parameters.Add(new SqlParameter("@EndDate", end));
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct);
+                var map = BuildOrdinalMap(reader);
+                var ordBillId = GetOrdinal(map, "BillId");
+                var ordBillDate = GetOrdinal(map, "BillDate");
+
                 while (await reader.ReadAsync(ct))
                 {
-                    var period = reader.GetString(0);
-                    var cnt = Convert.ToInt32(reader.GetValue(1));
-                    counts[period] = counts.TryGetValue(period, out var e) ? e + cnt : cnt;
+                    var billDate = FastGetDate(reader, ordBillDate);
+                    if (billDate == default || billDate.Date < start.Date || billDate.Date > end.Date)
+                        continue;
+
+                    var period = billDate.ToString("yyyyMM", System.Globalization.CultureInfo.InvariantCulture);
+                    var billId = FastGetInt(reader, ordBillId);
+
+                    if (!billsByPeriod.TryGetValue(period, out var set))
+                    {
+                        set = new HashSet<int>();
+                        billsByPeriod[period] = set;
+                    }
+                    set.Add(billId);
                 }
             }
         }
@@ -197,7 +205,8 @@ DROP TABLE #sp;";
         {
             if (shouldClose) await conn.CloseAsync();
         }
-        return counts;
+
+        return billsByPeriod.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.Count);
     }
 
     // The SP hardcodes GstType = 'B2B' on EVERY row it returns — it classifies
