@@ -1,4 +1,4 @@
-﻿using GSTAutoPilot.Application.Configuration;
+using GSTAutoPilot.Application.Configuration;
 using GSTAutoPilot.Application.Services;
 using GSTAutoPilot.Domain.Entities;
 using GSTAutoPilot.Infrastructure.CarolERP;
@@ -25,11 +25,27 @@ public static class DependencyInjection
             maxRetryDelay: TimeSpan.FromSeconds(5),
             errorNumbersToAdd: null);
 
+    private static string OptimizeConnectionString(string? connStr)
+    {
+        if (string.IsNullOrWhiteSpace(connStr)) return string.Empty;
+        try
+        {
+            var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(connStr);
+            if (builder.PacketSize < 32767) builder.PacketSize = 32767;
+            if (builder.ConnectTimeout < 30) builder.ConnectTimeout = 30;
+            return builder.ConnectionString;
+        }
+        catch
+        {
+            return connStr;
+        }
+    }
+
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
         // Persistence & Multi-Tenant DbContexts
         services.AddDbContext<MasterDbContext>(options =>
-            options.UseSqlServer(configuration.GetConnectionString("MasterConnection"), ConfigureSqlServer));
+            options.UseSqlServer(OptimizeConnectionString(configuration.GetConnectionString("MasterConnection")), ConfigureSqlServer));
 
         services.AddDbContext<TenantDbContext>((sp, options) =>
         {
@@ -42,7 +58,7 @@ public static class DependencyInjection
             var tenant = httpContextAccessor.HttpContext?.Items["Tenant"] as Tenant
                 ?? throw new InvalidOperationException(
                     "TenantDbContext requires a resolved tenant; ensure the X-Tenant-Id header is set and TenantMiddleware ran.");
-            options.UseSqlServer(tenant.ConnectionString, ConfigureSqlServer);
+            options.UseSqlServer(OptimizeConnectionString(tenant.ConnectionString), ConfigureSqlServer);
         });
 
         services.AddDbContext<CarolERPDbContext>((sp, options) =>
@@ -62,7 +78,7 @@ public static class DependencyInjection
                     $"Tenant '{tenant.Name}' has no CarolERPConnection configured. Set Tenants.CarolERPConnection in MasterDb before calling CarolERP-backed endpoints.");
             }
             // Target SQL Server 2014 (compat level 120) for CarolERP DB
-            options.UseSqlServer(tenant.CarolERPConnection, sql =>
+            options.UseSqlServer(OptimizeConnectionString(tenant.CarolERPConnection), sql =>
             {
                 ConfigureSqlServer(sql);
                 sql.UseCompatibilityLevel(120);

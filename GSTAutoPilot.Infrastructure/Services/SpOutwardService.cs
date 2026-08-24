@@ -59,46 +59,64 @@ public class SpOutwardService
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandType = CommandType.StoredProcedure;
                 cmd.CommandText = sp;
+                cmd.CommandTimeout = 120;
                 cmd.Parameters.Add(new SqlParameter("@GstNo", gstin));
                 cmd.Parameters.Add(new SqlParameter("@StartDate", start));
                 cmd.Parameters.Add(new SqlParameter("@EndDate", end));
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct);
                 var map = BuildOrdinalMap(reader);
+
+                var ordBillId = GetOrdinal(map, "BillId");
+                var ordBillNumber = GetOrdinal(map, "BillNumber");
+                var ordBillDate = GetOrdinal(map, "BillDate");
+                var ordAccountName = GetOrdinal(map, "AccountName");
+                var ordGstNumber = GetOrdinal(map, "GstNumber");
+                var ordGstType = GetOrdinal(map, "GstType");
+                var ordTotalAmt = GetOrdinal(map, "TotalAmt");
+                var ordTaxableAmt = GetOrdinal(map, "TaxableAmt");
+                var ordGstRate = GetOrdinal(map, "GstRate");
+                var ordCessAmt = GetOrdinal(map, "CessAmt");
+                var ordCgstAmt = GetOrdinal(map, "CGSTAmt");
+                var ordSgstAmt = GetOrdinal(map, "SGSTAmt");
+                var ordIgstAmt = GetOrdinal(map, "IGSTAmt");
+                var ordHsnCode = GetOrdinal(map, "HSNCode");
+
                 while (await reader.ReadAsync(ct))
                 {
-                    var billId = GetInt(reader, map, "BillId");
+                    var billId = FastGetInt(reader, ordBillId);
                     if (!byBill.TryGetValue(billId, out var inv))
                     {
+                        var rawGstType = FastGetString(reader, ordGstType);
                         inv = new InvoiceResponse
                         {
                             Id = DeterministicGuid(billId),
                             BillId = billId,
-                            InvoiceNumber = GetString(reader, map, "BillNumber"),
-                            InvoiceDate = GetDate(reader, map, "BillDate"),
-                            PartyName = GetString(reader, map, "AccountName"),
-                            PartyGSTIN = GetString(reader, map, "GstNumber"),
-                            Section = NormalizeSection(GetString(reader, map, "GstType")),
-                            GstCategory = GetString(reader, map, "GstType"),
-                            TotalAmount = GetDecimal(reader, map, "TotalAmt"),
+                            InvoiceNumber = FastGetString(reader, ordBillNumber),
+                            InvoiceDate = FastGetDate(reader, ordBillDate),
+                            PartyName = FastGetString(reader, ordAccountName),
+                            PartyGSTIN = FastGetString(reader, ordGstNumber),
+                            Section = NormalizeSection(rawGstType),
+                            GstCategory = rawGstType,
+                            TotalAmount = FastGetDecimal(reader, ordTotalAmt),
                         };
                         byBill[billId] = inv;
                     }
-                    var taxable = GetDecimal(reader, map, "TaxableAmt");
-                    var cgst = GetDecimal(reader, map, "CGSTAmt");
-                    var sgst = GetDecimal(reader, map, "SGSTAmt");
-                    var igst = GetDecimal(reader, map, "IGSTAmt");
+                    var taxable = FastGetDecimal(reader, ordTaxableAmt);
+                    var cgst = FastGetDecimal(reader, ordCgstAmt);
+                    var sgst = FastGetDecimal(reader, ordSgstAmt);
+                    var igst = FastGetDecimal(reader, ordIgstAmt);
                     inv.TaxableValue += taxable;
                     inv.CGST += cgst;
                     inv.SGST += sgst;
                     inv.IGST += igst;
                     inv.Lines.Add(new InvoiceLineResponse
                     {
-                        Id = DeterministicGuid(GetInt(reader, map, "BillId") * 1000 + inv.Lines.Count),
-                        HSNCode = GetString(reader, map, "HSNCode"),
+                        Id = DeterministicGuid(billId * 1000 + inv.Lines.Count),
+                        HSNCode = FastGetString(reader, ordHsnCode),
                         TaxableValue = taxable,
-                        GstRate = GetDecimal(reader, map, "GstRate"),
-                        Cess = GetDecimal(reader, map, "CessAmt"),
+                        GstRate = FastGetDecimal(reader, ordGstRate),
+                        Cess = FastGetDecimal(reader, ordCessAmt),
                         CGST = cgst,
                         SGST = sgst,
                         IGST = igst,
@@ -266,12 +284,25 @@ WHERE m.BillDate BETWEEN @StartDate AND @EndDate
     private async Task ApplyEInvoiceStatusAsync(IReadOnlyList<InvoiceResponse> invoices, CancellationToken ct)
     {
         if (invoices.Count == 0) return;
-        var billIds = invoices.Select(i => i.BillId).ToList();
-        var irnByBill = (await _db.IRNRecords.AsNoTracking()
-            .Where(r => r.BillId != null && billIds.Contains(r.BillId!.Value) && r.Status == IRNStatus.Generated)
-            .Select(r => new { BillId = r.BillId!.Value, r.IRNNumber })
-            .ToListAsync(ct))
-            .GroupBy(r => r.BillId).ToDictionary(g => g.Key, g => g.Last().IRNNumber);
+        var billIds = invoices.Select(i => i.BillId).Distinct().ToList();
+        var irnByBill = new Dictionary<int, string>();
+
+        const int chunkSize = 1000;
+        for (var i = 0; i < billIds.Count; i += chunkSize)
+        {
+            var chunk = billIds.Skip(i).Take(chunkSize).ToList();
+            var chunkIrns = await _db.IRNRecords.AsNoTracking()
+                .Where(r => r.BillId != null && chunk.Contains(r.BillId.Value) && r.Status == IRNStatus.Generated)
+                .Select(r => new { BillId = r.BillId!.Value, r.IRNNumber })
+                .ToListAsync(ct);
+
+            foreach (var item in chunkIrns)
+            {
+                if (!string.IsNullOrEmpty(item.IRNNumber))
+                    irnByBill[item.BillId] = item.IRNNumber;
+            }
+        }
+
         foreach (var inv in invoices)
         {
             var has = irnByBill.TryGetValue(inv.BillId, out var irn);
@@ -309,14 +340,20 @@ WHERE m.BillDate BETWEEN @StartDate AND @EndDate
         return m;
     }
 
-    private static int GetInt(SqlDataReader r, Dictionary<string, int> m, string col)
-        => m.TryGetValue(col, out var o) && !r.IsDBNull(o) ? Convert.ToInt32(r.GetValue(o)) : 0;
-    private static decimal GetDecimal(SqlDataReader r, Dictionary<string, int> m, string col)
-        => m.TryGetValue(col, out var o) && !r.IsDBNull(o) ? Convert.ToDecimal(r.GetValue(o)) : 0m;
-    private static string GetString(SqlDataReader r, Dictionary<string, int> m, string col)
-        => m.TryGetValue(col, out var o) && !r.IsDBNull(o) ? r.GetValue(o).ToString() ?? string.Empty : string.Empty;
-    private static DateTime GetDate(SqlDataReader r, Dictionary<string, int> m, string col)
-        => m.TryGetValue(col, out var o) && !r.IsDBNull(o) ? Convert.ToDateTime(r.GetValue(o)) : default;
+    private static int GetOrdinal(Dictionary<string, int> m, string col)
+        => m.TryGetValue(col, out var o) ? o : -1;
+
+    private static int FastGetInt(SqlDataReader r, int ord)
+        => ord >= 0 && !r.IsDBNull(ord) ? Convert.ToInt32(r.GetValue(ord)) : 0;
+
+    private static decimal FastGetDecimal(SqlDataReader r, int ord)
+        => ord >= 0 && !r.IsDBNull(ord) ? Convert.ToDecimal(r.GetValue(ord)) : 0m;
+
+    private static string FastGetString(SqlDataReader r, int ord)
+        => ord >= 0 && !r.IsDBNull(ord) ? r.GetValue(ord).ToString() ?? string.Empty : string.Empty;
+
+    private static DateTime FastGetDate(SqlDataReader r, int ord)
+        => ord >= 0 && !r.IsDBNull(ord) ? Convert.ToDateTime(r.GetValue(ord)) : default;
 
     private static Guid DeterministicGuid(int id)
     {

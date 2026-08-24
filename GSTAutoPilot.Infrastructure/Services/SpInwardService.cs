@@ -76,30 +76,41 @@ public class SpInwardService
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandType = CommandType.StoredProcedure;
                 cmd.CommandText = sp;
+                cmd.CommandTimeout = 120;
                 cmd.Parameters.Add(new SqlParameter("@GstNo", gstin));
                 cmd.Parameters.Add(new SqlParameter("@StartDate", start));
                 cmd.Parameters.Add(new SqlParameter("@EndDate", end));
 
                 await using var reader = await cmd.ExecuteReaderAsync(ct);
                 var map = BuildOrdinalMap(reader);
+
+                var ordDate = GetAnyOrdinal(map, "BillDate", "InvoiceDate", "InvDate");
+                var ordBillNum = GetAnyOrdinal(map, "BillNumber", "InvNo", "InvoiceNo");
+                var ordGstNum = GetAnyOrdinal(map, "GstNumber", "GSTNumber", "SupplierGSTIN");
+                var ordBillCat = GetAnyOrdinal(map, "Bill_Cat", "BillCat", "BillCategory", "DocCategory");
+                var ordTableRowId = GetAnyOrdinal(map, "TableRowId", "BillId", "RowId");
+                var ordAccountName = GetAnyOrdinal(map, "AccountName", "SupplierName");
+                var ordItc = GetAnyOrdinal(map, "ItcEligible");
+                var ordTaxable = GetAnyOrdinal(map, "TaxableAmt", "TaxableAmount", "Amount", "TaxableValue");
+                var ordCgst = GetAnyOrdinal(map, "CGSTAmt", "CGSTAmount", "CGST");
+                var ordSgst = GetAnyOrdinal(map, "SGSTAmt", "SGSTAmount", "SGST");
+                var ordIgst = GetAnyOrdinal(map, "IGSTAmt", "IGSTAmount", "IGST");
+                var ordRate = GetAnyOrdinal(map, "GstRate", "GSTRate");
+
                 while (await reader.ReadAsync(ct))
                 {
-                    var billDate = GetDateFlexible(reader, map, "BillDate", "InvoiceDate", "InvDate");
+                    var billDate = FastGetDateFlexible(reader, ordDate);
                     // Defensive: drop rows outside the requested month (SP may
                     // over-return earlier periods). Rows with an unparseable date
                     // are skipped rather than dumped into the wrong month.
                     if (billDate == default || billDate.Date < start.Date || billDate.Date > end.Date)
                         continue;
 
-                    var invoiceNo = GetStringAny(reader, map, "BillNumber", "InvNo", "InvoiceNo").Trim();
-                    var supplierGstin = NormalizeGstin(GetStringAny(reader, map, "GstNumber", "GSTNumber", "SupplierGSTIN"));
-                    // Document category from the SP's Bill_Cat column (purchase /
-                    // credit note / debit note). Part of the grouping key so a
-                    // credit note never merges with a purchase that happens to
-                    // share an invoice number.
-                    var category = ClassifyBillCat(GetStringAny(reader, map, "Bill_Cat", "BillCat", "BillCategory", "DocCategory"));
+                    var invoiceNo = FastGetString(reader, ordBillNum).Trim();
+                    var supplierGstin = NormalizeGstin(FastGetString(reader, ordGstNum));
+                    var category = ClassifyBillCat(FastGetString(reader, ordBillCat));
                     var key = string.IsNullOrEmpty(supplierGstin) && string.IsNullOrEmpty(invoiceNo)
-                        ? "row:" + GetIntAny(reader, map, "TableRowId", "BillId", "RowId")
+                        ? "row:" + FastGetInt(reader, ordTableRowId)
                         : supplierGstin + "|" + invoiceNo + "|" + category;
 
                     if (!byInvoice.TryGetValue(key, out var inv))
@@ -110,22 +121,22 @@ public class SpInwardService
                             InvoiceNo = string.IsNullOrEmpty(invoiceNo) ? key : invoiceNo,
                             InvoiceDate = billDate,
                             CreatedOn = billDate,
-                            SupplierName = GetStringAny(reader, map, "AccountName", "SupplierName"),
+                            SupplierName = FastGetString(reader, ordAccountName),
                             SupplierGSTIN = supplierGstin,
                             BillCategory = category,
                             // Optional: absent column defaults to eligible.
-                            IsITCEligible = GetBool(reader, map, "ItcEligible", @default: true),
+                            IsITCEligible = FastGetBool(reader, ordItc, @default: true),
                         };
                         byInvoice[key] = inv;
                     }
                     // Tax columns: accept both the app's canonical *Amt names and
                     // KSCC's Usp_GSTR2A_For_Filing *Amount names.
-                    inv.TaxableAmount += GetDecimalAny(reader, map, "TaxableAmt", "TaxableAmount", "Amount", "TaxableValue");
-                    inv.CGSTAmount += GetDecimalAny(reader, map, "CGSTAmt", "CGSTAmount", "CGST");
-                    inv.SGSTAmount += GetDecimalAny(reader, map, "SGSTAmt", "SGSTAmount", "SGST");
-                    inv.IGSTAmount += GetDecimalAny(reader, map, "IGSTAmt", "IGSTAmount", "IGST");
+                    inv.TaxableAmount += FastGetDecimal(reader, ordTaxable);
+                    inv.CGSTAmount += FastGetDecimal(reader, ordCgst);
+                    inv.SGSTAmount += FastGetDecimal(reader, ordSgst);
+                    inv.IGSTAmount += FastGetDecimal(reader, ordIgst);
                     // Representative rate for the invoice = the largest line rate.
-                    var rate = GetDecimalAny(reader, map, "GstRate", "GSTRate");
+                    var rate = FastGetDecimal(reader, ordRate);
                     if (rate > inv.GSTRate) inv.GSTRate = rate;
                 }
             }
@@ -247,6 +258,40 @@ public class SpInwardService
         var m = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < reader.FieldCount; i++) m[reader.GetName(i)] = i;
         return m;
+    }
+
+    private static int GetAnyOrdinal(Dictionary<string, int> m, params string[] cols)
+    {
+        foreach (var col in cols)
+            if (m.TryGetValue(col, out var o)) return o;
+        return -1;
+    }
+
+    private static int FastGetInt(SqlDataReader r, int ord)
+        => ord >= 0 && !r.IsDBNull(ord) ? Convert.ToInt32(r.GetValue(ord)) : 0;
+
+    private static decimal FastGetDecimal(SqlDataReader r, int ord)
+        => ord >= 0 && !r.IsDBNull(ord) ? Convert.ToDecimal(r.GetValue(ord)) : 0m;
+
+    private static string FastGetString(SqlDataReader r, int ord)
+        => ord >= 0 && !r.IsDBNull(ord) ? r.GetValue(ord).ToString() ?? string.Empty : string.Empty;
+
+    private static bool FastGetBool(SqlDataReader r, int ord, bool @default)
+        => ord >= 0 && !r.IsDBNull(ord) ? Convert.ToBoolean(Convert.ToInt32(r.GetValue(ord))) : @default;
+
+    private static DateTime FastGetDateFlexible(SqlDataReader r, int ord)
+    {
+        if (ord < 0 || r.IsDBNull(ord)) return default;
+        var v = r.GetValue(ord);
+        if (v is DateTime dt) return dt;
+        var s = v.ToString();
+        if (string.IsNullOrWhiteSpace(s)) return default;
+        s = s.Trim();
+        if (DateTime.TryParseExact(s, DateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+            return parsed;
+        if (DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out var p2))
+            return p2;
+        return default;
     }
 
     // Accepts the app's canonical name plus any known aliases; first present,
