@@ -86,7 +86,7 @@ namespace GSTAutoPilot.Infrastructure.Migrations
                     b.HasIndex("TenantId", "GstCategory")
                         .IsUnique();
 
-                    b.ToTable("DocumentMappings");
+                    b.ToTable("DocumentMappings", (string)null);
                 });
 
             modelBuilder.Entity("GSTAutoPilot.Domain.Entities.Tenant", b =>
@@ -145,7 +145,7 @@ namespace GSTAutoPilot.Infrastructure.Migrations
                     b.HasIndex("GSTIN")
                         .IsUnique();
 
-                    b.ToTable("Tenants");
+                    b.ToTable("Tenants", (string)null);
                 });
 
             modelBuilder.Entity("GSTAutoPilot.Domain.Entities.TenantSettings", b =>
@@ -251,7 +251,7 @@ namespace GSTAutoPilot.Infrastructure.Migrations
                         .HasDatabaseName("UX_TenantSettings_Tenant_Company")
                         .HasFilter("[CompanyId] IS NOT NULL");
 
-                    b.ToTable("TenantSettings");
+                    b.ToTable("TenantSettings", (string)null);
                 });
 
             modelBuilder.Entity("GSTAutoPilot.Domain.Entities.UserRole", b =>
@@ -293,7 +293,7 @@ namespace GSTAutoPilot.Infrastructure.Migrations
                     b.HasIndex("TenantId", "EmplCode")
                         .IsUnique();
 
-                    b.ToTable("UserRoles");
+                    b.ToTable("UserRoles", (string)null);
                 });
 #pragma warning restore 612, 618
         }

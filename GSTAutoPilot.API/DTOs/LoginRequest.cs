@@ -13,5 +13,6 @@ public class LoginResponse
     public string EmplCode { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string Role { get; set; } = string.Empty;
+    public List<string> Permissions { get; set; } = new();
     public Guid TenantId { get; set; }
 }

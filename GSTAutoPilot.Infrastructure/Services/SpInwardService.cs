@@ -8,6 +8,7 @@ using GSTAutoPilot.Infrastructure.CarolERP;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace GSTAutoPilot.Infrastructure.Services;
 
@@ -41,11 +42,16 @@ public class SpInwardService
 {
     private readonly CarolERPDbContext _carol;
     private readonly IHttpContextAccessor _http;
+    private readonly PerformanceOptions _perf;
 
-    public SpInwardService(CarolERPDbContext carol, IHttpContextAccessor http)
+    public SpInwardService(
+        CarolERPDbContext carol,
+        IHttpContextAccessor http,
+        IOptions<PerformanceOptions> perf)
     {
         _carol = carol;
         _http = http;
+        _perf = perf.Value;
     }
 
     private Tenant? Tenant => _http.HttpContext?.Items["Tenant"] as Tenant;
@@ -167,7 +173,9 @@ public class SpInwardService
     // counts DISTINCT invoices per period client-side.
     public async Task<Dictionary<string, int>> InwardCountsByPeriodAsync(CancellationToken ct = default)
     {
-        const int monthsBack = 24;
+        // Configurable (Performance:PeriodMonthsBack, default 12) — see the
+        // outward counterpart; the inward SP is charged the same way.
+        var monthsBack = Math.Max(1, _perf.PeriodMonthsBack);
         var spName = Tenant?.InwardSP;
         if (string.IsNullOrWhiteSpace(spName)) return new Dictionary<string, int>();
         var sp = ValidateSpName(spName);

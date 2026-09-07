@@ -13,6 +13,7 @@ public class LoginResult
     public string EmplCode { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public string Role { get; set; } = string.Empty;
+    public List<string> Permissions { get; set; } = new();
     public Guid TenantId { get; set; }
 }
 
@@ -31,6 +32,10 @@ public class UserRoleDto
     public string EmplCode { get; set; } = string.Empty;
     public string? DisplayName { get; set; }
     public string Role { get; set; } = string.Empty;
+
+    /// <summary>Effective module keys — an Admin row always resolves to every key.</summary>
+    public List<string> Permissions { get; set; } = new();
+
     public bool IsActive { get; set; }
     public DateTime CreatedOn { get; set; }
 }
@@ -41,4 +46,13 @@ public class AddUserRoleCommand
     public string EmplCode { get; set; } = string.Empty;
     public string? DisplayName { get; set; }
     public string Role { get; set; } = "User";
+
+    /// <summary>Module keys ticked by the admin. Ignored when Role is Admin.</summary>
+    public List<string> Permissions { get; set; } = new();
+}
+
+public class UpdateUserRoleCommand
+{
+    public string Role { get; set; } = "User";
+    public List<string> Permissions { get; set; } = new();
 }

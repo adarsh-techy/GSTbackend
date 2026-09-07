@@ -320,8 +320,37 @@ public class InvoiceService : IInvoiceService
         };
     }
 
+    private static (int Year, int Month)? ToPeriod(DateTime? date)
+        => date is null ? null : (date.Value.Year, date.Value.Month);
+
     public async Task<InvoiceResponse?> GetByBillIdAsync(int billId, CancellationToken cancellationToken = default)
     {
+        // Same rule as ListAsync: when the tenant has an outward SP, that SP is the
+        // sole data source. Reading a single invoice through the table-mapping path
+        // instead made the two views disagree — the list (and the pending-IRN queue
+        // built from it) offered invoices that this method could not load, so
+        // e-invoice generation failed with "not found in CarolERP" on every one of
+        // them. Serving the invoice from the same SP the list came from means
+        // anything the user can see is now something the generator can load.
+        if (_spOutward.IsConfigured)
+        {
+            // ListAsync is period-based, so the bill's period has to be resolved
+            // first. Ask the SP, not the ERP tables: KSCC's CC/n series is returned
+            // by the SP but sits in no header table, so dating it from the tables
+            // finds nothing and the invoice stays unreachable.
+            var period = await _spOutward.FindBillPeriodAsync(billId, cancellationToken)
+                // Only if the SP's window does not cover the bill (it looks back a
+                // fixed number of months) fall back to the ERP header tables.
+                ?? ToPeriod(await _reader.FindBillDateAsync(billId, cancellationToken));
+            if (period is null) return null;
+
+            var periodInvoices = await ListAsync(period.Value.Year, period.Value.Month, cancellationToken);
+            // ListAsync normalises Section (B2B/B2CL/B2CS/Export) and SpOutwardService
+            // already stamps the IRN status, so this is the same object the invoice
+            // screen shows — which is exactly what the payload builder should see.
+            return periodInvoices.FirstOrDefault(i => i.BillId == billId);
+        }
+
         var bundle = await _reader.ReadOutwardByBillIdAsync(billId, cancellationToken);
         if (bundle is null) return null;
 

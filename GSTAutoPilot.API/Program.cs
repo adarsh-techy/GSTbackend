@@ -1,8 +1,11 @@
+using System.IO.Compression;
 using System.Text;
 using GSTAutoPilot.API.Middleware;
+using Microsoft.AspNetCore.ResponseCompression;
 using GSTAutoPilot.API.Swagger;
 using GSTAutoPilot.Application.DependencyInjection;
 using GSTAutoPilot.Infrastructure.DependencyInjection;
+using GSTAutoPilot.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -12,30 +15,79 @@ using Microsoft.OpenApi;
 var builder = WebApplication.CreateBuilder(args);
 
 // Run cleanly under the Windows Service Control Manager when installed as a
-// service; a no-op when launched as a normal console process.
-builder.Host.UseWindowsService();
+// service — but never under IIS.
+//
+// UseWindowsService() decides whether it is running as a service by looking for a
+// non-interactive session, which is exactly what the IIS worker process (w3wp) is.
+// Hosted in IIS it therefore tried to attach to the Service Control Manager, failed
+// immediately, and died before any logging was configured. IIS could only report the
+// generic "HTTP Error 500.30 - ASP.NET Core app failed to start", and stdout logging
+// showed nothing because the failure happened before the log file was opened. The
+// same build ran perfectly as a console app, which is what made this hard to spot.
+//
+// ANCM sets these variables for both in-process and out-of-process hosting.
+var underIis =
+    Environment.GetEnvironmentVariable("ASPNETCORE_IIS_PHYSICAL_PATH") is not null
+    || Environment.GetEnvironmentVariable("ASPNETCORE_IIS_HTTPAUTH") is not null
+    || Environment.GetEnvironmentVariable("ASPNETCORE_IIS_APP_POOL_ID") is not null;
+
+if (!underIis)
+{
+    builder.Host.UseWindowsService();
+}
+
+// Which tenants this deployment lists and serves (config: "Tenants:Only" /
+// "Tenants:Hidden"). Singleton — the configuration is read once at startup.
+builder.Services.AddSingleton<GSTAutoPilot.API.Configuration.TenantVisibility>();
 
 // Clean Architecture Dependency Injections
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 
-// Configure CORS for Vercel and local frontend clients
+// Configure CORS for all frontend clients (local, deployed VPS, Vercel, etc.)
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowFrontend", policy =>
+    options.AddDefaultPolicy(policy =>
     {
-        policy.WithOrigins(
-                "http://localhost:5173",
-                "http://localhost:3000",
-                "https://gs-tclient.vercel.app",
-                "https://gs-tclient-git-main-adarsh-techys-projects.vercel.app"
-              )
-              .SetIsOriginAllowed(_ => true)
+        policy.SetIsOriginAllowed(_ => true)
               .AllowAnyMethod()
               .AllowAnyHeader()
-              .AllowCredentials();
+              .AllowCredentials()
+              .WithExposedHeaders("Content-Disposition", "X-Custom-Header")
+              .SetPreflightMaxAge(TimeSpan.FromHours(1));
+    });
+
+    options.AddPolicy("AllowFrontend", policy =>
+    {
+        policy.SetIsOriginAllowed(_ => true)
+              .AllowAnyMethod()
+              .AllowAnyHeader()
+              .AllowCredentials()
+              .WithExposedHeaders("Content-Disposition", "X-Custom-Header")
+              .SetPreflightMaxAge(TimeSpan.FromHours(1));
     });
 });
+
+// Response compression. The invoice/GSTR endpoints return the whole period as
+// one JSON document (every invoice, every line), and the client talks to this
+// API over the public internet, so these bodies are transfer-bound rather than
+// query-bound. JSON compresses roughly 5-10x.
+//
+// EnableForHttps is on deliberately: the BREACH/CRIME attacks that made this
+// off-by-default apply to responses that mix a secret (a session cookie or an
+// anti-forgery token) with attacker-controlled input. This API authenticates
+// with a bearer token held in localStorage and sets no cookies, so there is no
+// such secret in the response body.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(
+        new[] { "application/json", "application/problem+json" });
+});
+builder.Services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
 
 // Global Exception Handler & ProblemDetails
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
@@ -118,6 +170,26 @@ builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
+// The deployed master DB may predate UserRoles.Permissions. Probe here, before the
+// first MasterDbContext is resolved on the first request — EF compiles and caches
+// the model on first use, so probing any later would not affect the mapping.
+try
+{
+    var masterConnection = app.Configuration.GetConnectionString("MasterConnection");
+    if (!string.IsNullOrWhiteSpace(masterConnection)
+        && !await MasterSchema.ProbeAsync(masterConnection))
+    {
+        app.Logger.LogWarning(
+            "master.UserRoles has no Permissions column. Per-user module permissions are " +
+            "not persisted and non-admin users fall back to the full assignable module set. " +
+            "Add a nullable Permissions column to restore per-user grants.");
+    }
+}
+catch (Exception ex)
+{
+    app.Logger.LogError(ex, "Could not probe the master schema; assuming UserRoles.Permissions exists.");
+}
+
 // Configure Global Exception Middleware Pipeline
 app.UseExceptionHandler();
 
@@ -125,7 +197,12 @@ app.UseExceptionHandler();
 // auth). Must run first in the pipeline.
 app.UseForwardedHeaders();
 
+app.UseRouting();
 app.UseCors("AllowFrontend");
+
+// Ahead of the static-file and controller middleware so it covers both the
+// SPA bundle and the API responses.
+app.UseResponseCompression();
 
 if (app.Environment.IsDevelopment())
 {
@@ -136,10 +213,9 @@ if (app.Environment.IsDevelopment())
     });
 }
 
-// On by default. Set Hosting:EnableHttpsRedirection=false (env:
-// Hosting__EnableHttpsRedirection=false) when the app runs HTTP-only behind a
-// TLS-terminating proxy, to avoid redirect loops.
-if (app.Configuration.GetValue("Hosting:EnableHttpsRedirection", true))
+// Off by default. Set Hosting:EnableHttpsRedirection=true (env:
+// Hosting__EnableHttpsRedirection=true) only when the app directly terminates TLS.
+if (app.Configuration.GetValue("Hosting:EnableHttpsRedirection", false))
 {
     app.UseHttpsRedirection();
 }
@@ -152,7 +228,14 @@ if (string.IsNullOrWhiteSpace(webRoot))
 {
     webRoot = Path.Combine(app.Environment.ContentRootPath, "wwwroot");
 }
-Directory.CreateDirectory(Path.Combine(webRoot, "uploads", "logos"));
+try
+{
+    Directory.CreateDirectory(Path.Combine(webRoot, "uploads", "logos"));
+}
+catch (Exception ex)
+{
+    app.Logger.LogWarning(ex, "Could not create uploads/logos directory at startup: {Message}", ex.Message);
+}
 // Serve the bundled React SPA from wwwroot ("/" -> index.html, then static assets).
 app.UseDefaultFiles();
 app.UseStaticFiles();

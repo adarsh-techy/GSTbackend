@@ -65,6 +65,10 @@ public class ReturnValidationService : IReturnValidationService
             // notes are checked too). Flags data-entry / rate-master errors.
             if (inv.Lines.Any(LineTaxMismatch))
                 Add("Warning", "TAX_MISMATCH", $"Invoice {no}: line tax doesn't match rate x taxable value.", inv);
+
+            // Invoices exceeding e-invoice threshold must have IRN generated before filing.
+            if (string.Equals(inv.EInvoiceStatus, "Required", StringComparison.OrdinalIgnoreCase))
+                Add("Error", "EINVOICE_PENDING", $"Invoice {no}: e-Invoice (IRN) is required but not generated.", inv);
         }
         // NOTE: place-of-supply is intentionally NOT validated here. The SP-sourced
         // InvoiceResponse doesn't populate PlaceOfSupply/PosStateCode (the GSTN JSON

@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using GSTAutoPilot.Application.DTOs;
+using GSTAutoPilot.Application.Security;
 using GSTAutoPilot.Application.Services;
 using GSTAutoPilot.Domain.Entities;
 using GSTAutoPilot.Infrastructure.CarolERP;
@@ -99,7 +100,9 @@ public class AuthService : IAuthService
             await _master.SaveChangesAsync(cancellationToken);
         }
 
-        var (accessToken, expiresAt) = IssueJwt(role, employee.EmplName ?? employee.EmplCode, tenant.TenantId);
+        var permissions = ModulePermissions.Effective(
+            role.Role, role.Permissions, MasterSchema.HasUserRolePermissions);
+        var (accessToken, expiresAt) = IssueJwt(role, employee.EmplName ?? employee.EmplCode, tenant.TenantId, permissions);
 
         return new LoginResult
         {
@@ -108,11 +111,16 @@ public class AuthService : IAuthService
             EmplCode = role.EmplCode,
             DisplayName = role.DisplayName ?? employee.EmplName ?? role.EmplCode,
             Role = role.Role,
+            Permissions = permissions,
             TenantId = tenant.TenantId,
         };
     }
 
-    private (string Token, DateTime ExpiresAt) IssueJwt(UserRole role, string displayName, Guid tenantId)
+    private (string Token, DateTime ExpiresAt) IssueJwt(
+        UserRole role,
+        string displayName,
+        Guid tenantId,
+        IEnumerable<string> permissions)
     {
         var jwtSection = _configuration.GetSection("Jwt");
         var key = jwtSection["Key"] ?? throw new InvalidOperationException("Jwt:Key is not configured.");
@@ -136,6 +144,11 @@ public class AuthService : IAuthService
             new(ClaimTypes.Role, role.Role),
             new("role", role.Role),
         };
+
+        foreach (var permission in permissions)
+        {
+            claims.Add(new Claim("perm", permission));
+        }
 
         var token = new JwtSecurityToken(
             issuer: issuer,

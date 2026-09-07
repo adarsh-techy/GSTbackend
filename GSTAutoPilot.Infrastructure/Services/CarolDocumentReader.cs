@@ -50,6 +50,11 @@ public class CarolDocumentReader
         _lineProvider = lineProvider;
     }
 
+    // Header tables a CarolERP tenant may keep sales bills in, used as a last
+    // resort when locating a bill by id. Kept in step with the KnownTables
+    // catalogue in DocumentMappingService.
+    private static readonly string[] KnownHeaderTables = { "Bill_Mas", "Bill_File_mas" };
+
     private sealed record ResolvedMap(
         string HeaderTable,
         string LineTable,
@@ -263,6 +268,50 @@ public class CarolDocumentReader
             var extras = await ReadHeaderExtrasAsync(m.HeaderTable, new[] { billId }, ct);
             var ex = extras.TryGetValue(billId, out var e) ? e : null;
             return new CarolDocBundle(OutwardHeader(header, m, ex), lines);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The bill date for a bill id, looked up by id alone — deliberately WITHOUT
+    /// the document-type, sanction and company filters the other readers apply.
+    /// </summary>
+    /// <remarks>
+    /// Used only to work out which tax period a bill belongs to, so an SP-backed
+    /// tenant can then be served from its stored procedure. It must stay
+    /// unfiltered: the whole point is to locate bills the mapping path rejects
+    /// (see bug-031 — the invoice list is produced by the SP and offered bills
+    /// that <see cref="ReadOutwardByBillIdAsync"/> could not load, so IRN
+    /// generation failed on every queued invoice).
+    /// </remarks>
+    public async Task<DateTime?> FindBillDateAsync(int billId, CancellationToken ct = default)
+    {
+        var maps = await ResolveAsync(outward: true, ct);
+        var tables = maps
+            .Select(m => m.HeaderTable)
+            .Append(_carol.LegacySalesHeaderTable)   // covers tenants whose mappings are all disabled
+            // An SP can return bills from header tables no active mapping names —
+            // KSCC's CC/n series is one such case — so the known header tables are
+            // searched too (mirrors KnownTables in DocumentMappingService).
+            .Concat(KnownHeaderTables)
+            .Where(t => !string.IsNullOrWhiteSpace(t))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var table in tables)
+        {
+            try
+            {
+                var date = await _carol.HeadersFromTable(table)
+                    .Where(h => h.BillId == billId)
+                    .Select(h => (DateTime?)h.BillDate)
+                    .FirstOrDefaultAsync(ct);
+                if (date is not null) return date;
+            }
+            catch (Exception)
+            {
+                // A mapping may name a table that does not exist on this tenant's
+                // ERP; skip it and keep looking rather than failing the lookup.
+            }
         }
         return null;
     }

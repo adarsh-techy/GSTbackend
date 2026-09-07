@@ -1,4 +1,6 @@
+using GSTAutoPilot.API.Security;
 using GSTAutoPilot.Application.DTOs;
+using GSTAutoPilot.Application.Security;
 using GSTAutoPilot.Application.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -8,6 +10,7 @@ namespace GSTAutoPilot.API.Controllers;
 [ApiController]
 [Route("api/recon")]
 [Authorize]
+[RequiresPermission(ModulePermissions.Reconciliation)]
 public class ReconController : ControllerBase
 {
     private readonly IReconService _reconService;

@@ -30,6 +30,7 @@ public class InvoicePdfService : IInvoicePdfService
     private readonly ITenantSettingsService _settingsService;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly IWebHostEnvironment _hostEnv;
+    private readonly IInvoiceService _invoiceService;
 
     public InvoicePdfService(
         CarolERPDbContext carol,
@@ -38,7 +39,8 @@ public class InvoicePdfService : IInvoicePdfService
         ICompanyService companyService,
         ITenantSettingsService settingsService,
         IHttpContextAccessor httpContextAccessor,
-        IWebHostEnvironment hostEnv)
+        IWebHostEnvironment hostEnv,
+        IInvoiceService invoiceService)
     {
         _carol = carol;
         _reader = reader;
@@ -47,18 +49,58 @@ public class InvoicePdfService : IInvoicePdfService
         _settingsService = settingsService;
         _httpContextAccessor = httpContextAccessor;
         _hostEnv = hostEnv;
+        _invoiceService = invoiceService;
     }
 
     public async Task<InvoicePdfResult?> RenderAsync(int billId, CancellationToken cancellationToken = default)
     {
         var raw = await _reader.ReadOutwardRawByBillIdAsync(billId, cancellationToken);
-        if (raw is null) return null;
-        var header = raw.Value.Header;
 
-        var account = await _carol.Accounts
-            .FirstOrDefaultAsync(a => a.AccountId == header.AccountId, cancellationToken);
+        CarolSalesMas header;
+        CarolAccount? account;
+        IReadOnlyList<LineRow> lines;
+        CarolDocumentReader.HeaderExtras? extras;
+        string? prefix;
 
-        var lines = BuildLines(raw.Value.Lines);
+        if (raw is not null)
+        {
+            header = raw.Value.Header;
+            account = await _carol.Accounts
+                .FirstOrDefaultAsync(a => a.AccountId == header.AccountId, cancellationToken);
+            lines = BuildLines(raw.Value.Lines);
+            extras = raw.Value.Extras;
+            prefix = raw.Value.Prefix;
+        }
+        else
+        {
+            // The mapping reader only sees bills whose document type is covered by
+            // an active mapping and which pass the sanction filter. On an SP-backed
+            // tenant that is not the whole invoice list — KSCC's CC/n series is
+            // returned by the stored procedure and sits in no header table at all —
+            // so Print produced a 404 for every row (bug-042). Fall back to the same
+            // invoice the screen shows and print that.
+            var invoice = await _invoiceService.GetByBillIdAsync(billId, cancellationToken);
+            if (invoice is null) return null;
+
+            header = new CarolSalesMas
+            {
+                BillId = invoice.BillId,
+                BillDate = invoice.InvoiceDate,
+                InvNo = invoice.InvoiceNumber,   // already the full number, so no prefix
+                TotalAmt = invoice.TotalAmount,
+                ExchRate = 1m,                   // SP amounts are already in INR
+                SupplyType = invoice.PlaceOfSupply,
+                IRN = invoice.Irn,
+            };
+            account = new CarolAccount
+            {
+                AccountName = invoice.PartyName,
+                GstNo = invoice.PartyGSTIN,
+            };
+            lines = BuildLines(ToCarolLines(invoice));
+            extras = new CarolDocumentReader.HeaderExtras(invoice.PartyGSTIN, null);
+            prefix = null;
+        }
 
         var company = await _companyService.GetAsync(cancellationToken)
             ?? new CompanyDto { CompanyName = "Company" };
@@ -79,7 +121,7 @@ public class InvoicePdfService : IInvoicePdfService
         var qr = BuildQrPng(qrSource);
         var logo = TryLoadLogo(settings.LogoPath);
 
-        var invoiceNumber = BuildInvoiceNumber(header, raw.Value.Prefix);
+        var invoiceNumber = BuildInvoiceNumber(header, prefix);
         var fileName = $"Invoice-{Sanitize(invoiceNumber)}.pdf";
 
         var roundOffs = await _reader.ReadRoundOffAsync(new[] { billId }, cancellationToken);
@@ -94,12 +136,47 @@ public class InvoicePdfService : IInvoicePdfService
             invoiceNumber,
             qr,
             logo,
-            raw.Value.Extras,
+            extras,
             roundOff?.Amount ?? 0m,
             roundOff?.Label ?? string.Empty);
 
         var bytes = document.GeneratePdf();
         return new InvoicePdfResult(bytes, fileName);
+    }
+
+    // Lines as the stored procedure returned them, shaped into the same record the
+    // mapping reader produces so BuildLines can group them identically. Amounts are
+    // already INR and already net of discount, so GrossInr carries the pre-discount
+    // value only when the invoice records one.
+    private static IReadOnlyList<CarolSalesLine> ToCarolLines(InvoiceResponse invoice)
+    {
+        var lines = invoice.Lines;
+        if (lines is null || lines.Count == 0) return Array.Empty<CarolSalesLine>();
+
+        // The invoice-level discount is spread across the lines in proportion to
+        // their taxable value, so the printed "gross less discount" still adds up.
+        var taxableTotal = lines.Sum(l => l.TaxableValue);
+        var discount = invoice.Discount;
+
+        return lines.Select((l, i) =>
+        {
+            var share = discount != 0m && taxableTotal != 0m
+                ? decimal.Round(discount * (l.TaxableValue / taxableTotal), 2)
+                : 0m;
+            return new CarolSalesLine(
+                BillId: invoice.BillId,
+                LineSl: i + 1,
+                Description: l.Description ?? string.Empty,
+                Hsn: l.HSNCode ?? string.Empty,
+                Quantity: l.Quantity,
+                Rate: l.Rate,
+                TaxableInr: l.TaxableValue,
+                IgstRate: l.GstRate,
+                IgstAmount: l.IGST,
+                CgstAmount: l.CGST,
+                SgstAmount: l.SGST,
+                GrossInr: l.TaxableValue + share);
+        }).ToList();
     }
 
     // Lines arrive already normalized by CarolDocumentReader (the matching

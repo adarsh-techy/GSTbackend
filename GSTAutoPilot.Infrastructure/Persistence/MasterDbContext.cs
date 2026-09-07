@@ -44,6 +44,18 @@ public class MasterDbContext : DbContext
             entity.Property(u => u.EmplCode).IsRequired().HasMaxLength(50);
             entity.Property(u => u.DisplayName).HasMaxLength(100);
             entity.Property(u => u.Role).IsRequired().HasMaxLength(50);
+            // Mapped only where the deployed master DB actually has the column. On a
+            // database that predates it, mapping the property put it into every
+            // SELECT and broke login outright; ignoring keeps it out of the SQL and
+            // access falls back to the role model (see ModulePermissions.Effective).
+            if (MasterSchema.HasUserRolePermissions)
+            {
+                entity.Property(u => u.Permissions).HasMaxLength(1000);
+            }
+            else
+            {
+                entity.Ignore(u => u.Permissions);
+            }
             entity.HasIndex(u => new { u.TenantId, u.EmplCode }).IsUnique();
         });
 

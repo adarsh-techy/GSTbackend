@@ -1,3 +1,4 @@
+using GSTAutoPilot.API.Configuration;
 using GSTAutoPilot.Application.DTOs;
 using GSTAutoPilot.Domain.Entities;
 using GSTAutoPilot.Infrastructure.Persistence;
@@ -17,18 +18,39 @@ namespace GSTAutoPilot.API.Controllers;
 public class TenantsController : ControllerBase
 {
     private readonly MasterDbContext _master;
+    private readonly TenantVisibility _visibility;
 
-    public TenantsController(MasterDbContext master)
+    public TenantsController(MasterDbContext master, TenantVisibility visibility)
     {
         _master = master;
+        _visibility = visibility;
+    }
+
+    // Active tenants this deployment is configured to show (see TenantVisibility).
+    // The Contains sets are materialised so EF translates them to an IN / NOT IN.
+    private IQueryable<Tenant> VisibleTenants()
+    {
+        var query = _master.Tenants.AsNoTracking().Where(t => t.IsActive);
+
+        if (_visibility.OnlyIds.Count > 0)
+        {
+            var only = _visibility.OnlyIds.ToList();
+            return query.Where(t => only.Contains(t.TenantId));
+        }
+
+        if (_visibility.HiddenIds.Count > 0)
+        {
+            var hidden = _visibility.HiddenIds.ToList();
+            return query.Where(t => !hidden.Contains(t.TenantId));
+        }
+
+        return query;
     }
 
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<TenantSummaryDto>>> List(CancellationToken cancellationToken)
     {
-        var rows = await _master.Tenants
-            .AsNoTracking()
-            .Where(t => t.IsActive)
+        var rows = await VisibleTenants()
             .OrderBy(t => t.Name)
             .Select(t => new TenantSummaryDto
             {
@@ -51,9 +73,7 @@ public class TenantsController : ControllerBase
     [HttpGet("public")]
     public async Task<ActionResult<IReadOnlyList<TenantSummaryDto>>> PublicList(CancellationToken cancellationToken)
     {
-        var rows = await _master.Tenants
-            .AsNoTracking()
-            .Where(t => t.IsActive)
+        var rows = await VisibleTenants()
             .OrderBy(t => t.Name)
             .Select(t => new TenantSummaryDto { TenantId = t.TenantId, Name = t.Name })
             .ToListAsync(cancellationToken);

@@ -1,4 +1,6 @@
+using GSTAutoPilot.API.Security;
 using GSTAutoPilot.Application.DTOs;
+using GSTAutoPilot.Application.Security;
 using GSTAutoPilot.Application.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -8,6 +10,7 @@ namespace GSTAutoPilot.API.Controllers;
 [ApiController]
 [Route("api/gstr3b")]
 [Authorize]
+[RequiresPermission(ModulePermissions.Gstr3b)]
 public class Gstr3bController : ControllerBase
 {
     private readonly IGstr3bService _gstr3bService;

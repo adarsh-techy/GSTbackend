@@ -33,6 +33,9 @@ public class EInvoiceService : IEInvoiceService
     private readonly IEmailService _email;
     private readonly ITenantSettingsService _settings;
     private readonly IInvoicePdfService _pdf;
+    private readonly IFilingService _filingService;
+    private readonly IReturnValidationService _validationService;
+    private readonly WhiteBooksGst.IWhiteBooksGstClient _gstClient;
     private readonly ILogger<EInvoiceService> _logger;
 
     public EInvoiceService(
@@ -44,6 +47,9 @@ public class EInvoiceService : IEInvoiceService
         IEmailService email,
         ITenantSettingsService settings,
         IInvoicePdfService pdf,
+        IFilingService filingService,
+        IReturnValidationService validationService,
+        WhiteBooksGst.IWhiteBooksGstClient gstClient,
         ILogger<EInvoiceService> logger)
     {
         _db = db;
@@ -54,6 +60,9 @@ public class EInvoiceService : IEInvoiceService
         _email = email;
         _settings = settings;
         _pdf = pdf;
+        _filingService = filingService;
+        _validationService = validationService;
+        _gstClient = gstClient;
         _logger = logger;
     }
 
@@ -111,7 +120,9 @@ public class EInvoiceService : IEInvoiceService
 
         _db.IRNRecords.Add(record);
         await _db.SaveChangesAsync(cancellationToken);
-        return MapToResponse(record);
+        var resp = MapToResponse(record);
+        resp.AutoFiling = await TryAutoFileGstr1Async(invoice.InvoiceDate, cancellationToken);
+        return resp;
     }
 
     public async Task<string> PreviewPayloadAsync(int billId, CancellationToken cancellationToken = default)
@@ -253,8 +264,9 @@ public class EInvoiceService : IEInvoiceService
         };
         _db.IRNRecords.Add(record);
         await _db.SaveChangesAsync(cancellationToken);
-
-        return MapToResponse(record);
+        var resp = MapToResponse(record);
+        resp.AutoFiling = await TryAutoFileGstr1Async(invoice.InvoiceDate, cancellationToken);
+        return resp;
     }
 
     public async Task<IRNResponse> CancelAsync(Guid irnId, string reason, string? remarks = null, CancellationToken cancellationToken = default)
@@ -439,5 +451,141 @@ GSTIN: {company.GSTIN}";
             AgeHours = Math.Round(IRNAgeService.AgeHours(r.AcknowledgementDate), 1),
             TimeRemaining = IRNAgeService.GetTimeRemaining(r.AcknowledgementDate),
         };
+    }
+
+    private async Task<AutoFilingResult?> TryAutoFileGstr1Async(DateTime invoiceDate, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var year = invoiceDate.Year;
+            var month = invoiceDate.Month;
+            var period = $"{year:D4}{month:D2}";
+
+            // 1. If GSTR-1 for this period is already filed or submitted, do nothing.
+            var latest = await _filingService.LatestAsync(period, FilingType.Gstr1, cancellationToken);
+            if (latest != null && (latest.Status == FilingStatus.Filed || latest.Status == FilingStatus.Submitted))
+            {
+                return null;
+            }
+
+            // 2. Fetch outward invoices for this month to check e-invoice status.
+            var invoices = await _invoiceService.ListAsync(year, month, cancellationToken);
+            if (invoices == null || invoices.Count == 0)
+            {
+                return null;
+            }
+
+            // 3. Check if any invoice still requires an e-invoice.
+            var requiredPending = invoices.Count(i => string.Equals(i.EInvoiceStatus, "Required", StringComparison.OrdinalIgnoreCase));
+            if (requiredPending > 0)
+            {
+                return new AutoFilingResult
+                {
+                    Triggered = false,
+                    Period = period,
+                    PendingEInvoicesCount = requiredPending,
+                    Message = $"{requiredPending} e-invoice(s) still pending before GSTR-1 can auto-file."
+                };
+            }
+
+            // 4. Ensure at least one e-invoice has been done in this period.
+            var doneCount = invoices.Count(i => string.Equals(i.EInvoiceStatus, "Done", StringComparison.OrdinalIgnoreCase));
+            if (doneCount == 0)
+            {
+                return null;
+            }
+
+            _logger.LogInformation("All {DoneCount} required e-invoices completed for period {Period}. Initiating GSTR-1 auto-file.", doneCount, period);
+
+            // 5. Run GSTR-1 pre-file validation.
+            var validation = await _validationService.ValidateGstr1Async(year, month, cancellationToken);
+            if (validation.ErrorCount > 0)
+            {
+                _logger.LogWarning("Auto-filing GSTR-1 for {Period} stopped due to {ErrorCount} validation errors.", period, validation.ErrorCount);
+                return new AutoFilingResult
+                {
+                    Triggered = true,
+                    Period = period,
+                    Status = "ValidationFailed",
+                    Message = $"All {doneCount} e-invoices are done, but GSTR-1 validation found {validation.ErrorCount} error(s). Please review GSTR-1.",
+                    PendingEInvoicesCount = 0
+                };
+            }
+
+            // 6. Lock GSTR-1 return.
+            FilingResponse filing;
+            if (latest == null || latest.Status != FilingStatus.Locked)
+            {
+                filing = await _filingService.LockGstr1Async(period, confirmNil: false, cancellationToken);
+                _logger.LogInformation("GSTR-1 auto-locked for period {Period}, FilingId: {FilingId}", period, filing.FilingId);
+            }
+            else
+            {
+                filing = latest;
+            }
+
+            // 7. Auto-submit to GSTN if GSP client is configured.
+            if (_gstClient.IsConfigured)
+            {
+                try
+                {
+                    var submitRes = await _filingService.SubmitToGstnAsync(filing.FilingId, cancellationToken);
+                    if (submitRes.ReadyToFile)
+                    {
+                        _logger.LogInformation("GSTR-1 auto-submitted to GSTN for period {Period}. EVC OTP sent.", period);
+                        return new AutoFilingResult
+                        {
+                            Triggered = true,
+                            Period = period,
+                            Status = "Submitted",
+                            FilingId = filing.FilingId,
+                            Message = $"All {doneCount} e-invoices completed! GSTR-1 for {period} has been locked and submitted to GSTN. EVC OTP sent to registered mobile.",
+                            PendingEInvoicesCount = 0
+                        };
+                    }
+                    else
+                    {
+                        _logger.LogWarning("GSTR-1 auto-submit to GSTN for period {Period} returned errors: {Msg}", period, submitRes.Message);
+                        return new AutoFilingResult
+                        {
+                            Triggered = true,
+                            Period = period,
+                            Status = "SaveFailed",
+                            FilingId = filing.FilingId,
+                            Message = $"All e-invoices completed & GSTR-1 locked, but GSTN save reported errors: {submitRes.Message}",
+                            PendingEInvoicesCount = 0
+                        };
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Auto-submit to GSTN failed for period {Period}", period);
+                    return new AutoFilingResult
+                    {
+                        Triggered = true,
+                        Period = period,
+                        Status = "Locked",
+                        FilingId = filing.FilingId,
+                        Message = $"All {doneCount} e-invoices completed! GSTR-1 for {period} has been locked and is ready to submit on the GSTR-1 page.",
+                        PendingEInvoicesCount = 0
+                    };
+                }
+            }
+
+            return new AutoFilingResult
+            {
+                Triggered = true,
+                Period = period,
+                Status = "Locked",
+                FilingId = filing.FilingId,
+                Message = $"All {doneCount} e-invoices completed! GSTR-1 for {period} has been automatically locked and is ready to file.",
+                PendingEInvoicesCount = 0
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed during automatic GSTR-1 filing check for invoice date {Date}", invoiceDate);
+            return null;
+        }
     }
 }

@@ -8,6 +8,13 @@ public class UserRole
     public string EmplCode { get; set; } = string.Empty;
     public string? DisplayName { get; set; }
     public string Role { get; set; } = "User";
+
+    /// <summary>
+    /// Comma-separated module keys this user may open (see ModulePermissions).
+    /// Ignored for the Admin role, which always holds every permission.
+    /// </summary>
+    public string? Permissions { get; set; }
+
     public bool IsActive { get; set; } = true;
     public DateTime CreatedOn { get; set; } = DateTime.UtcNow;
 }

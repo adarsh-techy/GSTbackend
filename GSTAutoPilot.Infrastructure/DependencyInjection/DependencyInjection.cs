@@ -85,6 +85,14 @@ public static class DependencyInjection
             });
         });
 
+        // ERP read-path tuning + the short-lived cache that keeps one page load
+        // from running the same CarolERP stored procedure several times.
+        // Singleton so the cache spans requests; CarolERP is read-only, so
+        // nothing here can write to a customer database.
+        services.Configure<PerformanceOptions>(configuration.GetSection(PerformanceOptions.SectionName));
+        services.AddMemoryCache();
+        services.AddSingleton<ErpQueryCache>();
+
         // Core ERP & Sales Line Providers
         services.AddScoped<SalesLineProvider>();
         services.AddScoped<CarolDocumentReader>();
@@ -100,6 +108,7 @@ public static class DependencyInjection
         services.AddScoped<IGstr3bService, Gstr3bService>();
         services.AddScoped<IPurchaseInvoiceService, PurchaseInvoiceService>();
         services.AddScoped<IGstr2bService, Gstr2bService>();
+        services.AddScoped<IImsService, ImsService>();
         services.AddScoped<IReconService, ReconService>();
         services.AddScoped<IGstSummaryService, GstSummaryService>();
 

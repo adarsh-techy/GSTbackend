@@ -1,4 +1,5 @@
 using GSTAutoPilot.Application.DTOs;
+using GSTAutoPilot.Application.Security;
 using GSTAutoPilot.Application.Services;
 using GSTAutoPilot.Domain.Entities;
 using GSTAutoPilot.Infrastructure.CarolERP;
@@ -87,13 +88,15 @@ public class UserRolesService : IUserRolesService
             throw new InvalidOperationException($"User '{command.EmplCode}' is already assigned for this tenant.");
         }
 
+        var role = string.IsNullOrWhiteSpace(command.Role) ? "User" : command.Role;
         var entity = new UserRole
         {
             TenantId = tenant.TenantId,
             EmplId = employee.EmplId,
             EmplCode = employee.EmplCode,
             DisplayName = command.DisplayName ?? employee.EmplName,
-            Role = string.IsNullOrWhiteSpace(command.Role) ? "User" : command.Role,
+            Role = role,
+            Permissions = ResolveStoredPermissions(role, command.Permissions),
             IsActive = true,
             CreatedOn = DateTime.UtcNow,
         };
@@ -101,6 +104,41 @@ public class UserRolesService : IUserRolesService
         await _master.SaveChangesAsync(cancellationToken);
         return Map(entity);
     }
+
+    public async Task<UserRoleDto?> UpdateAsync(
+        int userRoleId,
+        UpdateUserRoleCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        var tenant = RequireTenant();
+        var entity = await _master.UserRoles
+            .FirstOrDefaultAsync(u => u.UserRoleId == userRoleId && u.TenantId == tenant.TenantId, cancellationToken);
+        if (entity is null) return null;
+
+        var role = string.IsNullOrWhiteSpace(command.Role) ? entity.Role : command.Role;
+
+        // Guard against the tenant losing its last admin.
+        if (ModulePermissions.IsAdmin(entity.Role) && !ModulePermissions.IsAdmin(role))
+        {
+            var otherAdmins = await _master.UserRoles.CountAsync(
+                u => u.TenantId == tenant.TenantId && u.UserRoleId != userRoleId && u.Role == "Admin",
+                cancellationToken);
+            if (otherAdmins == 0)
+            {
+                throw new InvalidOperationException("This is the only Admin for this company. Promote another user to Admin first.");
+            }
+        }
+
+        entity.Role = role;
+        entity.Permissions = ResolveStoredPermissions(role, command.Permissions);
+        await _master.SaveChangesAsync(cancellationToken);
+        return Map(entity);
+    }
+
+    private static string? ResolveStoredPermissions(string role, IEnumerable<string>? requested)
+        => ModulePermissions.IsAdmin(role)
+            ? null // Admin is unrestricted; storing a list would only go stale.
+            : ModulePermissions.ToCsv(ModulePermissions.Sanitize(requested));
 
     public async Task<bool> RemoveAsync(int userRoleId, CancellationToken cancellationToken = default)
     {
@@ -124,6 +162,8 @@ public class UserRolesService : IUserRolesService
         EmplCode = u.EmplCode,
         DisplayName = u.DisplayName,
         Role = u.Role,
+        Permissions = ModulePermissions.Effective(
+            u.Role, u.Permissions, MasterSchema.HasUserRolePermissions),
         IsActive = u.IsActive,
         CreatedOn = u.CreatedOn,
     };

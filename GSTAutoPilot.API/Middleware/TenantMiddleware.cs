@@ -1,3 +1,4 @@
+using GSTAutoPilot.API.Configuration;
 using GSTAutoPilot.Domain.Entities;
 using GSTAutoPilot.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -10,6 +11,8 @@ public class TenantMiddleware
     // Optional. Restricts CarolERP reads to a single CoId. Omit or "all" to
     // span every company in the tenant. Parsed as a byte (tinyint).
     private const string CompanyHeader = "X-Company-Id";
+    // Anonymous, tenant-less: the login screen's client picker.
+    private static readonly PathString PublicTenantsPath = "/api/tenants/public";
     private readonly RequestDelegate _next;
     private readonly ILogger<TenantMiddleware> _logger;
 
@@ -19,12 +22,33 @@ public class TenantMiddleware
         _logger = logger;
     }
 
-    public async Task InvokeAsync(HttpContext context, MasterDbContext masterDb)
+    public async Task InvokeAsync(HttpContext context, MasterDbContext masterDb, TenantVisibility visibility)
     {
         if (!context.Request.Headers.TryGetValue(TenantHeader, out var tenantHeaderValue) ||
             !Guid.TryParse(tenantHeaderValue, out var tenantId))
         {
             await _next(context);
+            return;
+        }
+
+        // This deployment is configured to serve only some of the tenants it holds.
+        // 401 rather than 404 on purpose: a browser holding a now-restricted tenant
+        // in localStorage gets logged out and lands back on the picker (which lists
+        // only the permitted clients) instead of erroring on every request.
+        if (!visibility.IsVisible(tenantId))
+        {
+            // ...except the pre-login picker, which needs no tenant and is exactly
+            // what such a browser must reach to correct itself. Rejecting it here
+            // left the stale list on screen with no way to refresh.
+            if (context.Request.Path.StartsWithSegments(PublicTenantsPath))
+            {
+                await _next(context);
+                return;
+            }
+
+            _logger.LogInformation("Rejected restricted tenant {TenantId}", tenantId);
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsync("This client is not available on this deployment.");
             return;
         }
 

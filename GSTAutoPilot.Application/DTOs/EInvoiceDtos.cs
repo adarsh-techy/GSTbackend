@@ -27,6 +27,19 @@ public class IRNResponse
     public bool IsStub { get; set; }
     public double AgeHours { get; set; }
     public string TimeRemaining { get; set; } = string.Empty;
+
+    // Triggered GSTR-1 auto-filing state when all period e-invoices are completed.
+    public AutoFilingResult? AutoFiling { get; set; }
+}
+
+public class AutoFilingResult
+{
+    public bool Triggered { get; set; }
+    public string Period { get; set; } = string.Empty;
+    public string Status { get; set; } = string.Empty; // "Locked" | "Submitted" | "SaveFailed" | "ValidationFailed"
+    public string Message { get; set; } = string.Empty;
+    public Guid? FilingId { get; set; }
+    public int PendingEInvoicesCount { get; set; }
 }
 
 public class CancelIrnRequest

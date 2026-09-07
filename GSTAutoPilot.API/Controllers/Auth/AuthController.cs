@@ -50,6 +50,7 @@ public class AuthController : ControllerBase
             EmplCode = result.EmplCode,
             DisplayName = result.DisplayName,
             Role = result.Role,
+            Permissions = result.Permissions,
             TenantId = result.TenantId,
         });
     }

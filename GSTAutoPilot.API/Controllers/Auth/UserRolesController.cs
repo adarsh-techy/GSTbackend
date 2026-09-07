@@ -65,6 +65,23 @@ public class UserRolesController : ControllerBase
         }
     }
 
+    [HttpPut("{userRoleId:int}")]
+    public async Task<ActionResult<UserRoleDto>> Update(
+        int userRoleId,
+        [FromBody] UpdateUserRoleCommand command,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _service.UpdateAsync(userRoleId, command, cancellationToken);
+            return result is null ? NotFound() : Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     [HttpDelete("{userRoleId:int}")]
     public async Task<ActionResult> Remove(int userRoleId, CancellationToken cancellationToken)
     {

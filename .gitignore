@@ -15,3 +15,7 @@ publish/
 .DS_Store
 Thumbs.db
 .vscode/
+
+## Backups
+*.backup-*
+
