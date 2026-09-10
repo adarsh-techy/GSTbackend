@@ -48,14 +48,6 @@ public class GstSummaryService : IGstSummaryService
         var tenant = _httpContextAccessor.HttpContext?.Items["Tenant"] as Tenant
             ?? throw new InvalidOperationException("Tenant not resolved.");
 
-        // Fast check: Only run full recon if results have never been computed for this period
-        var hasReconResults = await _db.ReconResults.AsNoTracking()
-            .AnyAsync(r => r.FilingPeriod == period, cancellationToken);
-        if (!hasReconResults)
-        {
-            await _reconService.RunAsync(period, cancellationToken);
-        }
-
         var periodStart = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
         var periodEnd = periodStart.AddMonths(1);
 
@@ -70,6 +62,16 @@ public class GstSummaryService : IGstSummaryService
         var recon = await _db.ReconResults.AsNoTracking()
             .Where(r => r.FilingPeriod == period)
             .ToListAsync(cancellationToken);
+
+        // Nothing persisted for this period yet. Reconcile in memory so the
+        // dashboard still shows real figures — but do NOT save. This endpoint is a
+        // GET and previously called RunAsync here, which quietly wrote rows on
+        // first view and returned HTTP 500 when that write failed (bug-048).
+        // Pressing "Run Recon" is what persists results.
+        if (recon.Count == 0)
+        {
+            recon = (await ((ReconService)_reconService).ComputeAsync(period, cancellationToken)).ToList();
+        }
 
         // Only fetch book rows if there are matched rows needing ITC verification
         var hasMatched = recon.Any(r => r.Status == ReconStatus.Matched);

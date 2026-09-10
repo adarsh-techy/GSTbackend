@@ -385,16 +385,19 @@ public class TenantSettingsService : ITenantSettingsService
         IsConfigured = !string.IsNullOrWhiteSpace(row?.SmtpHost) && !string.IsNullOrWhiteSpace(row?.SmtpFromEmail),
     };
 
-    private static WhiteBooksStatusDto BuildWhiteBooksStatus(TenantSettings? row, string? gstin)
+    private WhiteBooksStatusDto BuildWhiteBooksStatus(TenantSettings? row, string? gstin)
     {
         var hasCreds = !string.IsNullOrWhiteSpace(row?.WhiteBooksClientId) && !string.IsNullOrWhiteSpace(row?.WhiteBooksClientSecret);
-        var sandbox = row?.WhiteBooksUseSandbox ?? true;
+        // Mirror WhiteBooksClient.Resolve(): the server-wide ForceSandbox
+        // override wins over the tenant row, and the screen must say so.
+        var forced = _wbOptions.ForceSandbox;
+        var sandbox = forced || (row?.WhiteBooksUseSandbox ?? true);
         return new WhiteBooksStatusDto
         {
             Enabled = row?.WhiteBooksEnabled ?? false,
             UseSandbox = sandbox,
             HasCredentials = hasCreds,
-            Environment = sandbox ? "Sandbox" : "Production",
+            Environment = forced ? "Sandbox (forced by server config)" : sandbox ? "Sandbox" : "Production",
             ClientId = MaskClientId(row?.WhiteBooksClientId),
             Username = string.IsNullOrWhiteSpace(row?.WhiteBooksUsername) ? null : row!.WhiteBooksUsername,
             HasPassword = !string.IsNullOrWhiteSpace(row?.WhiteBooksPassword),

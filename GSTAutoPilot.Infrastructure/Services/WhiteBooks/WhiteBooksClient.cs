@@ -132,12 +132,35 @@ public class WhiteBooksClient : IWhiteBooksClient
     private sealed record Creds(string ClientId, string ClientSecret, string BaseUrl, string Gstin,
         string Email, string Username, string Password, bool Sandbox, bool Configured);
 
+    // TEMPORARY (2026-09-10) — reads the Sandbox/Production toggle's per-request
+    // header. Returns null when the feature is off, the header is absent, or the
+    // value is not recognised, in which case the caller falls back to the tenant
+    // row exactly as before. true = sandbox, false = production.
+    public static bool? ReadEnvHeader(HttpContext? context, WhiteBooksOptions options)
+    {
+        if (context is null || !options.AllowEnvHeaderOverride) return null;
+        if (!context.Request.Headers.TryGetValue(WhiteBooksOptions.EnvHeaderName, out var raw)) return null;
+
+        return raw.ToString().Trim().ToLowerInvariant() switch
+        {
+            "sandbox" or "test" => true,
+            "production" or "prod" or "live" => false,
+            _ => null,
+        };
+    }
+
     private Creds Resolve()
     {
         var tenant = _httpContextAccessor.HttpContext?.Items["Tenant"] as Tenant;
-        var useSandbox = tenant is not null
+        // TEMPORARY header override from the app's Sandbox/Production toggle.
+        // Per-request only; nothing is written to the tenant row.
+        var headerChoice = ReadEnvHeader(_httpContextAccessor.HttpContext, _options);
+        // ForceSandbox is the server-wide override: neither the tenant row nor
+        // the header can switch generation to production while it is set.
+        var tenantChoice = tenant is not null
             ? GetTenantSettings(tenant)?.WhiteBooksUseSandbox ?? _options.UseSandbox
             : _options.UseSandbox;
+        var useSandbox = _options.ForceSandbox || (headerChoice ?? tenantChoice);
 
         if (useSandbox)
         {
@@ -284,7 +307,11 @@ public class WhiteBooksClient : IWhiteBooksClient
         var env = JsonSerializer.Deserialize<WhiteBooksEnvelope<WhiteBooksIrnData>>(body);
         if (env is null || !env.IsSuccess || env.Data is null || string.IsNullOrWhiteSpace(env.Data.Irn))
         {
-            throw new InvalidOperationException($"WhiteBooks IRN generation rejected: {env?.StatusDesc ?? Truncate(body)}");
+            // The portal answers with a JSON array of codes. Show the user what it
+            // means rather than the array itself; the raw text is still logged above.
+            var friendly = NicErrorTranslator.ToPlainEnglish(env?.StatusDesc ?? body);
+            throw new InvalidOperationException(
+                friendly ?? $"The government did not accept this invoice. {env?.StatusDesc ?? Truncate(body)}");
         }
 
         var d = env.Data;
@@ -330,7 +357,11 @@ public class WhiteBooksClient : IWhiteBooksClient
 
         var env = JsonSerializer.Deserialize<WhiteBooksEnvelope<object>>(body);
         if (env is null || !env.IsSuccess)
-            throw new InvalidOperationException($"WhiteBooks IRN cancel rejected: {env?.StatusDesc ?? Truncate(body)}");
+        {
+            var friendly = NicErrorTranslator.ToPlainEnglish(env?.StatusDesc ?? body);
+            throw new InvalidOperationException(
+                friendly ?? $"The government did not accept this cancellation. {env?.StatusDesc ?? Truncate(body)}");
+        }
         _logger.LogInformation("WhiteBooks IRN {Irn} cancelled", irn);
     }
 

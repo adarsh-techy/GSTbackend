@@ -323,6 +323,33 @@ public class InvoiceService : IInvoiceService
     private static (int Year, int Month)? ToPeriod(DateTime? date)
         => date is null ? null : (date.Value.Year, date.Value.Month);
 
+    /// <summary>
+    /// Fills in the buyer's postal address from the CarolERP customer master.
+    /// </summary>
+    /// <remarks>
+    /// The outward SP returns the counter-party GSTIN but no address, so the
+    /// e-invoice went out with "NotSpecified" and PIN 999999 and was refused by
+    /// the government (NIC 2274). Looked up here, on the single-invoice path, so
+    /// it costs nothing on the list screens.
+    /// </remarks>
+    private async Task AttachPartyAddressAsync(InvoiceResponse invoice, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(invoice.PartyGSTIN)) return;
+        try
+        {
+            var byGstin = await _carol.AccountAddressesByGstinAsync(ct);
+            if (!byGstin.TryGetValue(invoice.PartyGSTIN.Trim(), out var a)) return;
+            invoice.PartyAddress1 = (a.Addr1 ?? a.FullAddress ?? string.Empty).Trim();
+            invoice.PartyAddress2 = (a.Addr2 ?? string.Empty).Trim();
+            invoice.PartyPinCode = (a.PinCode ?? string.Empty).Trim();
+        }
+        catch (Exception)
+        {
+            // An install without these columns must not break invoice loading;
+            // the payload builder falls back to its placeholders as before.
+        }
+    }
+
     public async Task<InvoiceResponse?> GetByBillIdAsync(int billId, CancellationToken cancellationToken = default)
     {
         // Same rule as ListAsync: when the tenant has an outward SP, that SP is the
@@ -348,7 +375,9 @@ public class InvoiceService : IInvoiceService
             // ListAsync normalises Section (B2B/B2CL/B2CS/Export) and SpOutwardService
             // already stamps the IRN status, so this is the same object the invoice
             // screen shows — which is exactly what the payload builder should see.
-            return periodInvoices.FirstOrDefault(i => i.BillId == billId);
+            var found = periodInvoices.FirstOrDefault(i => i.BillId == billId);
+            if (found is not null) await AttachPartyAddressAsync(found, cancellationToken);
+            return found;
         }
 
         var bundle = await _reader.ReadOutwardByBillIdAsync(billId, cancellationToken);

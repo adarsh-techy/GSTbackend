@@ -31,6 +31,40 @@ public class ReconService : IReconService
 
     public async Task<ReconRunResponse> RunAsync(string filingPeriod, CancellationToken cancellationToken = default)
     {
+        var results = (List<ReconResult>)await ComputeAsync(filingPeriod, cancellationToken);
+
+        var stale = await _db.ReconResults
+            .Where(r => r.FilingPeriod == filingPeriod)
+            .ToListAsync(cancellationToken);
+        if (stale.Count > 0)
+        {
+            _db.ReconResults.RemoveRange(stale);
+        }
+
+        _db.ReconResults.AddRange(results);
+        await _db.SaveChangesAsync(cancellationToken);
+
+        return new ReconRunResponse
+        {
+            FilingPeriod = filingPeriod,
+            RowsProcessed = results.Count,
+            Summary = BuildSummary(results),
+            RanOn = DateTime.UtcNow,
+        };
+    }
+
+    /// <summary>
+    /// Reconciles the period and returns the rows, <b>without persisting anything</b>.
+    /// </summary>
+    /// <remarks>
+    /// Split out of <see cref="RunAsync"/> so the dashboard can show reconciliation
+    /// health for a period that has never been run without writing to the database.
+    /// A GET must not mutate (bug-048): the summary endpoint used to call RunAsync
+    /// on first view, which silently created rows — and failed outright with HTTP
+    /// 500 for two periods, taking the whole dashboard down with it.
+    /// </remarks>
+    public async Task<IReadOnlyList<ReconResult>> ComputeAsync(string filingPeriod, CancellationToken cancellationToken = default)
+    {
         var tenant = _httpContextAccessor.HttpContext?.Items["Tenant"] as Tenant
             ?? throw new InvalidOperationException("Tenant not resolved.");
 
@@ -59,14 +93,6 @@ public class ReconService : IReconService
         // 2B CDNR; everything else matches 2B B2B.
         var bookB2B = bookRows.Where(b => !b.IsCreditNote);
         var bookCdn = bookRows.Where(b => b.IsCreditNote);
-
-        var stale = await _db.ReconResults
-            .Where(r => r.FilingPeriod == filingPeriod)
-            .ToListAsync(cancellationToken);
-        if (stale.Count > 0)
-        {
-            _db.ReconResults.RemoveRange(stale);
-        }
 
         var results = new List<ReconResult>();
         var now = DateTime.UtcNow;
@@ -152,19 +178,47 @@ public class ReconService : IReconService
             });
         }
 
-        _db.ReconResults.AddRange(results);
-        await _db.SaveChangesAsync(cancellationToken);
-
-        var summary = BuildSummary(results);
-
-        return new ReconRunResponse
+        // One malformed value in the ERP must not take down a whole month. KSCC's
+        // Feb/Mar 2026 purchase register contains the supplier GSTIN
+        // "32DNOPS9275R1ZPO" — 16 characters, one more than a GSTIN can be — and
+        // SupplierGSTIN is nvarchar(15), so the insert threw and the entire
+        // reconciliation (and the dashboard built on it) failed with HTTP 500
+        // (bug-048). Values are clamped to their column widths here, and anything
+        // clamped is called out in the remarks so the data fault stays visible
+        // rather than being silently swallowed.
+        foreach (var r in results)
         {
-            FilingPeriod = filingPeriod,
-            RowsProcessed = results.Count,
-            Summary = summary,
-            RanOn = now,
-        };
+            var notes = new List<string>();
+
+            if (r.SupplierGSTIN.Length > GstinMax)
+            {
+                notes.Add($"Supplier GSTIN in the ERP is {r.SupplierGSTIN.Length} characters (\"{r.SupplierGSTIN}\") — a GSTIN is {GstinMax}. Correct it in the ERP; ITC for this supplier cannot be matched reliably until then.");
+                r.SupplierGSTIN = r.SupplierGSTIN[..GstinMax];
+            }
+            if (r.InvoiceNo.Length > InvoiceNoMax)
+            {
+                notes.Add($"Invoice number exceeds {InvoiceNoMax} characters and has been shortened for storage.");
+                r.InvoiceNo = r.InvoiceNo[..InvoiceNoMax];
+            }
+
+            if (notes.Count > 0)
+            {
+                r.AIRemarks = string.Join(" ", notes.Append(r.AIRemarks));
+            }
+            if (r.AIRemarks.Length > RemarksMax)
+            {
+                r.AIRemarks = r.AIRemarks[..RemarksMax];
+            }
+        }
+
+        return results;
     }
+
+    // Column widths of the ReconResults table. Named here so the guard above is
+    // easy to keep in step if the schema changes.
+    private const int GstinMax = 15;
+    private const int InvoiceNoMax = 50;
+    private const int RemarksMax = 1000;
 
     public async Task<ReconReportResponse> GetResultsAsync(string filingPeriod, CancellationToken cancellationToken = default)
     {

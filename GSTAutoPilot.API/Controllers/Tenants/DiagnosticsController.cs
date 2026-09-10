@@ -17,11 +17,54 @@ public class DiagnosticsController : ControllerBase
 {
     private readonly SpOutwardService _outward;
     private readonly SpInwardService _inward;
+    private readonly Infrastructure.CarolERP.CarolERPDbContext _carol;
 
-    public DiagnosticsController(SpOutwardService outward, SpInwardService inward)
+    public DiagnosticsController(
+        SpOutwardService outward,
+        SpInwardService inward,
+        Infrastructure.CarolERP.CarolERPDbContext carol)
     {
         _outward = outward;
         _inward = inward;
+        _carol = carol;
+    }
+
+    /// <summary>
+    /// The columns on the CarolERP customer master, so an implementer can see
+    /// which address fields this install actually carries.
+    /// </summary>
+    /// <remarks>
+    /// Added while chasing NIC 2274 ("Recipient PIN code cannot be 999999"): the
+    /// e-invoice payload sends no buyer address because the mapped entity exposes
+    /// only name, GSTIN, country and state — but the underlying table differs per
+    /// CarolERP install, so the columns have to be discovered rather than assumed.
+    /// Reads INFORMATION_SCHEMA only, through the read-only CarolERP context.
+    /// </remarks>
+    [HttpGet("erp-account-columns")]
+    public async Task<IActionResult> ErpAccountColumns(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var columns = await _carol.AccountColumnsAsync(cancellationToken);
+            var addressLike = columns
+                .Where(c => System.Text.RegularExpressions.Regex.IsMatch(
+                    c.Name, "addr|address|pin|post|city|town|place|dist|street|area|location|state",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                .ToList();
+
+            return Ok(new
+            {
+                table = "Account",
+                flavor = _carol.Flavor,
+                columnCount = columns.Count,
+                columns,
+                addressLike,
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { error = ex.Message });
+        }
     }
 
     // Exercises both SPs live (24-month count) and reports a green/amber/red

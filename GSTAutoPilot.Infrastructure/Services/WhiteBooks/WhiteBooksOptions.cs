@@ -20,6 +20,25 @@ public class WhiteBooksOptions
     public bool IsEnabled { get; set; }
     public bool UseSandbox { get; set; } = true;
 
+    // Server-side safety catch. When true, EVERY tenant is routed to the
+    // sandbox regardless of TenantSettings.WhiteBooksUseSandbox, so a tenant
+    // row left in "Production" (as KSCC's was on 2026-09-09, which put a real
+    // IRN on the live portal from a test run) cannot reach api.whitebooks.in.
+    // Flip to false only for a deliberate, signed-off go-live.
+    public bool ForceSandbox { get; set; }
+
+    // TEMPORARY (2026-09-10) — powers the Sandbox/Production toggle in the app
+    // header and the red sandbox frame. While true, a request may carry
+    // "X-WhiteBooks-Env: sandbox|production" to pick the environment for that
+    // request only. Nothing is persisted; the tenant row is never written.
+    // ForceSandbox still outranks the header, so production stays unreachable
+    // until that catch is cleared too. Set to false to remove the feature: the
+    // header is then ignored and the UI toggle disappears.
+    public bool AllowEnvHeaderOverride { get; set; }
+
+    // Header the toggle sends. Values: "sandbox" | "production".
+    public const string EnvHeaderName = "X-WhiteBooks-Env";
+
     public string BaseUrl => UseSandbox ? SandboxUrl : ProductionUrl;
     public WhiteBooksCredentials Active => UseSandbox ? Sandbox : Production;
 

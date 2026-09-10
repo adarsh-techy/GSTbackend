@@ -198,6 +198,98 @@ ELSE
         public string? Email { get; set; }
     }
 
+    /// <summary>
+    /// Buyer postal address per GSTIN, from the CarolERP customer master.
+    /// </summary>
+    /// <remarks>
+    /// The e-invoice payload previously sent "NotSpecified" and PIN 999999 for
+    /// every buyer, which the government rejects outright (NIC 2274), because the
+    /// mapped entity exposes only name, GSTIN, country and state. The address is
+    /// in the table all along — KSCC's `Account` carries Addr1, Addr2, AcAddress
+    /// and PinCode. Column names vary between installs, so each is probed before
+    /// use rather than assumed. Keyed by GSTIN because the outward SP supplies the
+    /// counter-party GSTIN but no AccountId.
+    /// </remarks>
+    public async Task<IReadOnlyDictionary<string, AccountAddressRow>> AccountAddressesByGstinAsync(
+        CancellationToken ct = default)
+    {
+        var empty = new Dictionary<string, AccountAddressRow>(StringComparer.OrdinalIgnoreCase);
+        var gstCol = string.Equals(Flavor, "KSCC", StringComparison.OrdinalIgnoreCase) ? "GSTNumber" : "GstNo";
+        if (!await ColumnExistsAsync("Account", gstCol, ct)) return empty;
+
+        // Pick whichever address columns this install actually has.
+        var expr = async (string column, string type) =>
+            await ColumnExistsAsync("Account", column, ct) ? column : $"CAST(NULL AS {type})";
+        var addr1 = await expr("Addr1", "varchar(100)");
+        var addr2 = await expr("Addr2", "varchar(100)");
+        var full = await expr("AcAddress", "varchar(500)");
+        var pin = await expr("PinCode", "varchar(10)");
+
+#pragma warning disable EF1002
+        var rows = await Database.SqlQueryRaw<AccountAddressRow>($@"
+SELECT LTRIM(RTRIM({gstCol})) AS Gstin,
+       {addr1} AS Addr1,
+       {addr2} AS Addr2,
+       {full}  AS FullAddress,
+       {pin}   AS PinCode
+FROM Account
+WHERE {gstCol} IS NOT NULL AND LEN(LTRIM(RTRIM({gstCol}))) = 15").ToListAsync(ct);
+#pragma warning restore EF1002
+
+        foreach (var r in rows)
+        {
+            if (string.IsNullOrWhiteSpace(r.Gstin)) continue;
+            // Branches can share a GSTIN; the first row with a usable PIN wins,
+            // otherwise the first row seen.
+            var key = r.Gstin!.ToUpperInvariant();
+            if (!empty.TryGetValue(key, out var held) || (string.IsNullOrWhiteSpace(held.PinCode) && !string.IsNullOrWhiteSpace(r.PinCode)))
+            {
+                empty[key] = r;
+            }
+        }
+        return empty;
+    }
+
+    public sealed class AccountAddressRow
+    {
+        public string? Gstin { get; set; }
+        public string? Addr1 { get; set; }
+        public string? Addr2 { get; set; }
+        public string? FullAddress { get; set; }
+        public string? PinCode { get; set; }
+    }
+
+    /// <summary>
+    /// Column names and types on the CarolERP customer master (`Account`).
+    /// </summary>
+    /// <remarks>
+    /// The table's shape differs between CarolERP installs, so anything reading
+    /// customer detail — the buyer address on an e-invoice, for one — has to
+    /// discover what is present rather than assume it. Reads INFORMATION_SCHEMA
+    /// only; this context cannot write (SaveChanges throws).
+    /// </remarks>
+    public async Task<IReadOnlyList<ErpColumn>> AccountColumnsAsync(CancellationToken ct = default)
+    {
+#pragma warning disable EF1002
+        return await Database.SqlQueryRaw<ErpColumn>(@"
+SELECT COLUMN_NAME AS Name,
+       DATA_TYPE AS Type,
+       CAST(CHARACTER_MAXIMUM_LENGTH AS int) AS MaxLength,
+       CAST(CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END AS bit) AS Nullable
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME = 'Account'
+ORDER BY ORDINAL_POSITION").ToListAsync(ct);
+#pragma warning restore EF1002
+    }
+
+    public sealed class ErpColumn
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Type { get; set; } = string.Empty;
+        public int? MaxLength { get; set; }
+        public bool Nullable { get; set; }
+    }
+
     public async Task<IReadOnlyList<CompanyListRow>> ListCompaniesAsync(CancellationToken ct = default)
     {
         var col = CompanyGstColumn;

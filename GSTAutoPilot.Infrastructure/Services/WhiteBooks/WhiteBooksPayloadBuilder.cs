@@ -108,7 +108,7 @@ internal static class WhiteBooksPayloadBuilder
                 LglNm = string.IsNullOrWhiteSpace(company.CompanyName) ? "Seller" : company.CompanyName,
                 Addr1 = Trim(company.Address1 ?? "NotSpecified", 100),
                 Loc = Trim(company.Address2 ?? company.Address1 ?? "NotSpecified", 50),
-                Pin = ParsePin(company.PinCode, sellerStateCode),
+                Pin = ResolveSellerPin(company, sellerStateCode),
                 Stcd = sellerStateCode,
             },
             BuyerDtls = new
@@ -116,12 +116,24 @@ internal static class WhiteBooksPayloadBuilder
                 Gstin = buyerGstin,
                 LglNm = string.IsNullOrWhiteSpace(invoice.PartyName) ? "Buyer" : invoice.PartyName,
                 Pos = pos,
-                // NIC enforces min length 3 on Addr1 and Loc — placeholder "NA"
-                // (2 chars) fails with 5002 on every export bill where
-                // PlaceOfSupply is empty. Use a 3+ char default.
-                Addr1 = Trim(string.IsNullOrWhiteSpace(invoice.PlaceOfSupply) ? (isExport ? "Foreign" : "NotSpecified") : invoice.PlaceOfSupply, 100),
-                Loc = Trim(string.IsNullOrWhiteSpace(invoice.PlaceOfSupply) ? (isExport ? "Foreign" : "NotSpecified") : invoice.PlaceOfSupply, 50),
-                Pin = isExport ? 999999 : 999999,
+                // The buyer's real address from the CarolERP customer master when
+                // it is there, falling back to the place of supply. NIC enforces a
+                // minimum length of 3 on Addr1 and Loc — the old "NA" placeholder
+                // (2 chars) failed with 5002 on export bills with no place of
+                // supply — so any default has to be 3 characters or more.
+                Addr1 = Trim(FirstNonBlank(
+                    invoice.PartyAddress1,
+                    invoice.PlaceOfSupply,
+                    isExport ? "Foreign" : "NotSpecified"), 100),
+                Loc = Trim(FirstNonBlank(
+                    invoice.PartyAddress2,
+                    invoice.PartyAddress1,
+                    invoice.PlaceOfSupply,
+                    isExport ? "Foreign" : "NotSpecified"), 50),
+                // NIC rejects a recipient PIN of 999999 on a B2B invoice (2274).
+                // An export buyer is outside India and 999999 is the value NIC
+                // expects there, so it is kept for exports only.
+                Pin = isExport ? 999999 : ParsePin(invoice.PartyPinCode, pos),
                 Stcd = pos,
             },
             ValDtls = BuildValDtls(invoice, isExport),
@@ -147,28 +159,57 @@ internal static class WhiteBooksPayloadBuilder
     {
         if (!isExport)
         {
+            var assVal = Round(invoice.TaxableValue);
+            var igst = Round(invoice.IGST);
+            var cgst = Round(invoice.CGST);
+            var sgst = Round(invoice.SGST);
+            var totInv = Round(invoice.TotalAmount);
+
+            // NIC recomputes the invoice total as
+            //     AssVal + taxes + OthChrg - Discount + RndOffAmt
+            // and refuses anything that does not balance (2189). KSCC's totals
+            // frequently do not: on the CC/SB series the ERP's total is lower than
+            // taxable + tax by consistently 10% of the taxable value — an
+            // invoice-level reduction that the outward stored procedure does not
+            // report in any column of its own (Discount and RoundOff both come
+            // through as zero). 273 of 616 invoices for April 2026 are affected.
+            //
+            // The amount is therefore derived from the arithmetic itself: whatever
+            // is missing from the total has to be declared, or the government will
+            // not accept the invoice. A material gap is a discount; a rupee or two
+            // either way is a rounding adjustment, which NIC expects in RndOffAmt.
+            // RndOffAmt is signed the opposite way to the gap because it ADDS to
+            // the total where Discount subtracts.
+            var gap = Round(assVal + igst + cgst + sgst - totInv);
+            var discount = gap > RoundingTolerance ? gap : 0m;
+            var rndOff = discount == 0m ? -gap : 0m;
+
             return new
             {
-                AssVal = (double)Round(invoice.TaxableValue),
-                IgstVal = (double)Round(invoice.IGST),
-                CgstVal = (double)Round(invoice.CGST),
-                SgstVal = (double)Round(invoice.SGST),
-                TotInvVal = (double)Round(invoice.TotalAmount),
+                AssVal = (double)assVal,
+                IgstVal = (double)igst,
+                CgstVal = (double)cgst,
+                SgstVal = (double)sgst,
+                Discount = (double)discount,
+                RndOffAmt = (double)rndOff,
+                TotInvVal = (double)totInv,
             };
         }
-        var assVal = invoice.Lines.Count > 0
+        var expAssVal = invoice.Lines.Count > 0
             ? Round(invoice.Lines.Sum(l => Round(l.TaxableValue)))
             : Round(invoice.TaxableValue);
-        var igstVal = invoice.Lines.Count > 0
+        var expIgstVal = invoice.Lines.Count > 0
             ? Round(invoice.Lines.Sum(l => l.GstRate > 0 ? Round(Round(l.TaxableValue) * l.GstRate / 100m) : 0m))
             : Round(invoice.IGST);
+        // Exports recompute the total from their own parts, so it balances by
+        // construction and needs no discount or rounding entry.
         return new
         {
-            AssVal = (double)assVal,
-            IgstVal = (double)igstVal,
+            AssVal = (double)expAssVal,
+            IgstVal = (double)expIgstVal,
             CgstVal = 0.0,
             SgstVal = 0.0,
-            TotInvVal = (double)Round(assVal + igstVal),
+            TotInvVal = (double)Round(expAssVal + expIgstVal),
         };
     }
 
@@ -193,6 +234,44 @@ internal static class WhiteBooksPayloadBuilder
         var digits = new string((pin ?? string.Empty).Where(char.IsDigit).ToArray());
         return digits.Length == 6 && int.TryParse(digits, out var p) ? p : 999999;
     }
+
+    /// <summary>
+    /// The seller PIN, taken from the dedicated field when it is set and otherwise
+    /// recovered from the free-text address lines.
+    /// </summary>
+    /// <remarks>
+    /// NIC rejects a supplier PIN of 999999 outright (error 2276), so every
+    /// e-invoice failed for KSCC: the company record has no PinCode, yet the real
+    /// PIN is sitting in the address as "ALAPPUZHA - 688 001, KERALA, INDIA".
+    /// Indian PINs are commonly written with a space after the third digit, so
+    /// "688 001" has to be recognised as well as "688001".
+    /// </remarks>
+    private static int ResolveSellerPin(CompanyDto company, string stateCode)
+    {
+        var explicitPin = ParsePin(company.PinCode, stateCode);
+        if (explicitPin != 999999) return explicitPin;
+
+        foreach (var line in new[] { company.Address2, company.Address3, company.Address1 })
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            // Three digits, an optional single space, then three digits. A leading
+            // zero is not a valid Indian PIN, which also keeps this off house
+            // numbers such as "P.B. No. 191".
+            var m = System.Text.RegularExpressions.Regex.Match(line, @"\b([1-9]\d{2})\s?(\d{3})\b");
+            if (m.Success && int.TryParse(m.Groups[1].Value + m.Groups[2].Value, out var fromAddress))
+            {
+                return fromAddress;
+            }
+        }
+        return 999999;
+    }
+
+    // Above this, a shortfall in the invoice total is treated as a discount; at or
+    // below it, as a rounding adjustment. NIC itself tolerates ±1 on the total.
+    private const decimal RoundingTolerance = 2m;
+
+    private static string FirstNonBlank(params string?[] candidates)
+        => candidates.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c))?.Trim() ?? string.Empty;
 
     private static decimal Round(decimal v) => decimal.Round(v, 2, MidpointRounding.AwayFromZero);
 

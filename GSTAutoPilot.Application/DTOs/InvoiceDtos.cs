@@ -12,6 +12,12 @@ public class InvoiceResponse
     public DateTime InvoiceDate { get; set; }
     public string PartyName { get; set; } = string.Empty;
     public string PartyGSTIN { get; set; } = string.Empty;
+    // Buyer postal address from the CarolERP customer master. Needed on the
+    // e-invoice: the government rejects a recipient PIN of 999999 (NIC 2274).
+    // Empty when the ERP holds no address for that GSTIN.
+    public string PartyAddress1 { get; set; } = string.Empty;
+    public string PartyAddress2 { get; set; } = string.Empty;
+    public string PartyPinCode { get; set; } = string.Empty;
     public string PlaceOfSupply { get; set; } = string.Empty;
     // 2-digit GST place-of-supply state code of the BUYER (from CarolERP
     // Account.StateId). Used to fix POS for B2C / unregistered supplies, where

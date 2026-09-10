@@ -449,14 +449,25 @@ WHERE m.BillDate BETWEEN @StartDate AND @EndDate
     }
 
     // Map the app's five section values; passes through anything already matching.
+    //
+    // KSCC's outward SP labels unregistered consumer sales with the plain word
+    // "B2C" (CC/ILS, CC/LSMT, CC/TVHZ and the Cash counter series). Until
+    // 2026-09-09 that value fell through untouched, no GSTR-1 table claimed it,
+    // and the builder's tie-out refused the whole return (NOT_IN_ANY_TABLE:
+    // 58 invoices in Aug 2026, 45 in Apr). "B2C" is therefore folded into
+    // B2CS here; InvoiceService.NormalizeB2clB2cs then promotes any inter-state
+    // invoice above the statutory threshold to B2CL, exactly as for rows the
+    // SP already labels B2CS. Matching is case-insensitive for the same reason.
     private static string NormalizeSection(string gstType)
     {
         var s = (gstType ?? string.Empty).Trim();
-        return s switch
+        return s.ToUpperInvariant() switch
         {
-            "B2B" or "B2CS" or "B2CL" or "Export" or "CDN" => s,
-            "EXP" or "EXPORT" => "Export",
-            "" => "B2CS",
+            "B2B" => "B2B",
+            "B2CS" or "B2C" or "" => "B2CS",
+            "B2CL" => "B2CL",
+            "EXPORT" or "EXP" => "Export",
+            "CDN" => "CDN",
             _ => s,
         };
     }
